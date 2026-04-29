@@ -30,6 +30,8 @@ export function Mic({
   onReplay,
   onSkip,
   onSeek,
+  hasStaged,
+  onSendStaged,
 }: {
   state: MicState;
   onState: (s: MicState) => void;
@@ -44,6 +46,11 @@ export function Mic({
   onReplay?: () => void;
   onSkip?: (deltaSeconds: number) => void;
   onSeek?: (seconds: number) => void;
+  // Staged-text mode: composer has user text waiting to be sent.
+  // Tapping the circle fires onSendStaged. Long press still starts recording
+  // (transcript will be appended to the staged text in the composer).
+  hasStaged?: boolean;
+  onSendStaged?: () => void;
 }) {
   const phaseRef = useRef<Phase>({ kind: "idle" });
   const heldRef = useRef(false);
@@ -293,7 +300,7 @@ export function Mic({
         onSeek(t);
         return;
       }
-      // Center tap → schedule pause/resume on release; long-press → record
+      // Center tap → handle on release; long-press → record
       pressTimerRef.current = window.setTimeout(() => {
         longPressTriggeredRef.current = true;
         // Long press during playback → interrupt and record
@@ -303,7 +310,16 @@ export function Mic({
       return;
     }
 
-    // No audio → normal hold-to-talk
+    // Staged text waiting → tap-to-send / long-press to record more
+    if (hasStaged) {
+      pressTimerRef.current = window.setTimeout(() => {
+        longPressTriggeredRef.current = true;
+        void start();
+      }, 350);
+      return;
+    }
+
+    // No audio, no staged text → normal hold-to-talk
     void start();
   }
 
@@ -326,7 +342,6 @@ export function Mic({
         pressTimerRef.current = null;
       }
       if (longPressTriggeredRef.current) {
-        // Long press already kicked off recording → release stops it
         stop();
         return;
       }
@@ -338,6 +353,22 @@ export function Mic({
       }
       return;
     }
+
+    if (hasStaged) {
+      if (pressTimerRef.current) {
+        window.clearTimeout(pressTimerRef.current);
+        pressTimerRef.current = null;
+      }
+      if (longPressTriggeredRef.current) {
+        // Long press already kicked off recording → release stops it
+        stop();
+        return;
+      }
+      // Short tap with staged text → send it
+      onSendStaged?.();
+      return;
+    }
+
     stop();
   }
 
@@ -373,11 +404,15 @@ export function Mic({
           ? "Speaking — tap to interrupt"
           : "Hold ⌥Space or click and hold to talk";
 
-  const label = haloLabel ?? recLabel;
+  const stagedLabel =
+    hasStaged && !halo && state !== "recording" && state !== "transcribing"
+      ? "Tap to send · hold to add more"
+      : null;
+  const label = haloLabel ?? stagedLabel ?? recLabel;
 
   /* ---------- Render ---------- */
 
-  // Active visual state (halo overrides).
+  // Active visual state (halo overrides; staged is next priority).
   const activeClass = halo
     ? isPlaying
       ? "playing"
@@ -386,7 +421,9 @@ export function Mic({
         : isLoading
           ? "loading"
           : ""
-    : state;
+    : hasStaged && state !== "recording" && state !== "transcribing"
+      ? "staged-ready"
+      : state;
 
   const dashOffset = RING_C * (1 - ringProgress);
 
@@ -425,7 +462,8 @@ export function Mic({
           </svg>
         )}
 
-        {/* Center icon: play/pause when halo, otherwise the regular dot */}
+        {/* Center icon: play/pause when halo, send arrow when staged text,
+            otherwise the regular dot. */}
         {halo ? (
           <span className="center-icon" aria-hidden="true">
             {isPlaying ? (
@@ -438,6 +476,12 @@ export function Mic({
                 <path d="M7 5v14l12-7z" />
               </svg>
             )}
+          </span>
+        ) : hasStaged && state !== "recording" && state !== "transcribing" ? (
+          <span className="center-icon staged" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 12l16-7-7 16-2.5-6.5L4 12z" />
+            </svg>
           </span>
         ) : (
           <>
@@ -562,6 +606,21 @@ export function Mic({
           width: 26px;
           height: 26px;
           fill: hsl(var(--clay));
+        }
+        .center-icon.staged :global(svg) {
+          width: 28px;
+          height: 28px;
+          fill: hsl(var(--clay));
+          stroke: hsl(var(--clay));
+          stroke-width: 1;
+          stroke-linejoin: round;
+        }
+        /* When the mic is in 'staged' standby (no halo), we still want the
+           container to register the staged look. */
+        .mic.staged-ready {
+          background: hsl(var(--clay) / 0.10);
+          border-color: hsl(var(--clay) / 0.4);
+          box-shadow: 0 0 0 4px hsl(var(--clay) / 0.08);
         }
         .mic .dot {
           position: absolute;
