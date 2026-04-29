@@ -427,7 +427,21 @@ export function Conversation({
 
   function handleTranscript(text: string, _ms: number) {
     setMicState("idle");
-    void send(text, voiceMode ? "voice" : "text");
+    // Stage the transcript instead of auto-sending. The composer pops up
+    // with the text pre-filled so the user can edit before tapping the mic
+    // circle (which becomes a Send button while text is staged) or the
+    // composer's Send button.
+    setShowInput(true);
+    setInput((cur) => (cur ? `${cur} ${text}` : text));
+  }
+
+  function sendStaged() {
+    const v = input.trim();
+    if (!v || streaming) return;
+    setInput("");
+    // Voice source so the agent's reply is spoken aloud, matching the
+    // assumption the user spoke their turn.
+    void send(v, voiceMode ? "voice" : "text");
   }
 
   const titleLine = useMemo(() => {
@@ -554,6 +568,8 @@ export function Conversation({
           onReplay={() => speakerRef.current?.replayLast()}
           onSkip={(d: number) => speakerRef.current?.skip(d)}
           onSeek={(t: number) => speakerRef.current?.seek(t)}
+          hasStaged={input.trim().length > 0 && !streaming}
+          onSendStaged={sendStaged}
         />
         <div className="speed">
           <label htmlFor="speed-slider" title={`Playback ${speed.toFixed(2)}x`}>
@@ -713,32 +729,45 @@ export function Conversation({
           .kbd-toggle {
             font-size: 12px;
             padding: 6px 12px;
-            margin-top: 6px;
           }
           .dock {
-            padding: 0 0 calc(env(safe-area-inset-bottom, 0) + 18px) 0;
-            gap: 4px;
-            min-height: 38dvh;
-            justify-content: center;
+            padding: 16px 16px calc(env(safe-area-inset-bottom, 0) + 24px) 16px;
+            gap: 16px;
+            min-height: 36dvh;
+            justify-content: flex-end;
             align-items: center;
           }
+          .dock :global(.mic-row) {
+            gap: 12px;
+          }
           .dock :global(.mic) {
-            width: 110px !important;
-            height: 110px !important;
+            width: 124px !important;
+            height: 124px !important;
           }
           .dock :global(.mic .dot) {
             width: 22px !important;
             height: 22px !important;
           }
-          .dock :global(.hint) { font-size: 13px !important; }
+          .dock :global(.hint) {
+            font-size: 13px !important;
+            margin-top: 4px;
+          }
+          .dock :global(.ghost-row) {
+            margin-top: 8px;
+          }
+          .dock-actions {
+            margin-top: 0;
+            gap: 14px;
+          }
           .composer {
-            width: 92%;
-            max-width: 92%;
-            padding: 0 16px;
-            margin-top: 6px;
+            width: 100%;
+            max-width: 100%;
+            padding: 0;
+            margin-top: 4px;
           }
           .composer-input {
             font-size: 16px; /* prevents iOS zoom on focus */
+            min-height: 48px;
           }
         }
         .conv {
