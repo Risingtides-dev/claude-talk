@@ -363,6 +363,17 @@ export function Mic({
     e.preventDefault();
     longPressTriggeredRef.current = false;
 
+    // Fire onPress on every tap-down so the parent can unlock the
+    // AudioContext while we're still inside the user-gesture handler. iOS
+    // Safari only allows audio playback to start from inside a gesture; if
+    // the user taps to send staged text or to pause/resume, we still need
+    // to be unlocked because the response that follows is going to play.
+    try {
+      onPress?.();
+    } catch {
+      /* ignore */
+    }
+
     if (halo) {
       // Try ring-seek first
       const t = ringSecondsFromEvent(e);
