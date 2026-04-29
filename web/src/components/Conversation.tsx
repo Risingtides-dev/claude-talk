@@ -842,7 +842,9 @@ export function Conversation({
                 }
               }}
               rows={2}
-              autoFocus
+              // No autoFocus — only focus when the user taps into the
+              // textarea, so the on-screen keyboard doesn't pop up just
+              // because we're showing staged voice text.
             />
             <button
               type="submit"
