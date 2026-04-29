@@ -533,7 +533,9 @@ export function Conversation({
             aria-label="Browse files on this Mac"
             title="Browse Mac files"
           >
-            📁
+            <svg viewBox="0 0 24 24">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+            </svg>
           </button>
           <button
             className="dock-btn"
@@ -542,7 +544,17 @@ export function Conversation({
             title="Upload"
             disabled={uploading || !session?.cwd}
           >
-            {uploading ? "…" : "📎"}
+            {uploading ? (
+              <svg viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="9" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24">
+                <path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5" />
+                <path d="M16 4l4 4-4 4" />
+                <path d="M20 8H10" />
+              </svg>
+            )}
           </button>
           <button
             className="dock-btn camera-only"
@@ -551,7 +563,10 @@ export function Conversation({
             title="Camera"
             disabled={uploading || !session?.cwd}
           >
-            📷
+            <svg viewBox="0 0 24 24">
+              <path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8z" />
+              <circle cx="12" cy="13" r="3.5" />
+            </svg>
           </button>
           <button
             className="kbd-toggle"
@@ -602,17 +617,41 @@ export function Conversation({
         )}
         {showInput && (
           <form className="composer" onSubmit={handleSubmit}>
-            <input
+            <textarea
+              ref={(el) => {
+                if (!el) return;
+                // auto-grow up to a max height
+                el.style.height = "auto";
+                const max = 220;
+                el.style.height = Math.min(el.scrollHeight, max) + "px";
+              }}
               className="composer-input"
-              placeholder="Type a message…"
+              placeholder="Type a message…  (Enter to send, Shift+Enter for newline)"
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                const el = e.currentTarget;
+                el.style.height = "auto";
+                el.style.height = Math.min(el.scrollHeight, 220) + "px";
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (input.trim() && !streaming) {
+                    const v = input;
+                    setInput("");
+                    void send(v, "text");
+                  }
+                }
+              }}
+              rows={2}
               autoFocus
             />
             <button
               type="submit"
               className="send"
               disabled={!input.trim() || streaming}
+              aria-label="Send"
             >
               {streaming ? "…" : "Send"}
             </button>
@@ -796,19 +835,37 @@ export function Conversation({
           margin-top: 6px;
         }
         .dock-btn {
-          font-size: 16px;
-          padding: 6px 10px;
+          width: 36px;
+          height: 36px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
           border-radius: var(--radius-md);
           background: hsl(var(--bg-200));
-          color: hsl(var(--text-200));
-          transition: background var(--dur-fast) var(--ease);
+          color: hsl(var(--text-300));
+          transition: background var(--dur-fast) var(--ease),
+            color var(--dur-fast) var(--ease);
         }
-        .dock-btn:hover { background: hsl(var(--bg-300)); }
-        .dock-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .dock-btn :global(svg) {
+          width: 18px;
+          height: 18px;
+          stroke: currentColor;
+          fill: none;
+          stroke-width: 1.6;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        .dock-btn:hover {
+          background: hsl(var(--bg-300));
+          color: hsl(var(--text-100));
+        }
+        .dock-btn:disabled { opacity: 0.4; cursor: not-allowed; }
         .camera-only { display: none; }
         @media (max-width: 760px) { .camera-only { display: inline-flex; } }
         .composer {
           display: flex;
+          align-items: flex-end;
           gap: 8px;
           width: 100%;
           max-width: 760px;
@@ -819,6 +876,18 @@ export function Conversation({
           background: hsl(var(--bg-100));
           border-radius: var(--radius-lg);
           font-size: 14px;
+          line-height: 1.45;
+          resize: none;
+          min-height: 40px;
+          max-height: 220px;
+          overflow-y: auto;
+          font-family: inherit;
+          color: hsl(var(--text-100));
+          border: 1px solid hsl(var(--border-300) / 0.12);
+        }
+        .composer-input:focus {
+          outline: none;
+          border-color: hsl(var(--clay) / 0.4);
         }
         .send {
           padding: 0 16px;
