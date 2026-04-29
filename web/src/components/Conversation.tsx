@@ -97,6 +97,33 @@ export function Conversation({
   const [input, setInput] = useState("");
   const [showInput, setShowInput] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileUploadRef = useRef<HTMLInputElement | null>(null);
+  const cameraUploadRef = useRef<HTMLInputElement | null>(null);
+
+  async function handleUpload(file: File) {
+    if (!session?.cwd) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("cwd", session.cwd);
+      fd.append("file", file);
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      const j = await r.json();
+      if (!r.ok) {
+        // eslint-disable-next-line no-console
+        console.error("[upload] failed", j);
+        return;
+      }
+      setShowInput(true);
+      setInput((cur) => {
+        const ref = `"${j.path}"`;
+        return cur ? `${cur} ${ref}` : ref;
+      });
+    } finally {
+      setUploading(false);
+    }
+  }
   const [voiceMode, setVoiceMode] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [voiceName, setVoiceName] = useState<string>("claude");
@@ -503,10 +530,28 @@ export function Conversation({
           <button
             className="dock-btn"
             onClick={() => setPickerOpen(true)}
-            aria-label="Attach file from disk"
-            title="Attach file"
+            aria-label="Browse files on this Mac"
+            title="Browse Mac files"
           >
-            📎
+            📁
+          </button>
+          <button
+            className="dock-btn"
+            onClick={() => fileUploadRef.current?.click()}
+            aria-label="Upload a file"
+            title="Upload"
+            disabled={uploading || !session?.cwd}
+          >
+            {uploading ? "…" : "📎"}
+          </button>
+          <button
+            className="dock-btn camera-only"
+            onClick={() => cameraUploadRef.current?.click()}
+            aria-label="Take a photo"
+            title="Camera"
+            disabled={uploading || !session?.cwd}
+          >
+            📷
           </button>
           <button
             className="kbd-toggle"
@@ -516,6 +561,28 @@ export function Conversation({
           >
             {showInput ? "Hide keyboard" : "Type"}
           </button>
+          <input
+            ref={fileUploadRef}
+            type="file"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleUpload(f);
+              e.target.value = "";
+            }}
+          />
+          <input
+            ref={cameraUploadRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleUpload(f);
+              e.target.value = "";
+            }}
+          />
         </div>
         {pickerOpen && (
           <FilePicker
@@ -737,6 +804,9 @@ export function Conversation({
           transition: background var(--dur-fast) var(--ease);
         }
         .dock-btn:hover { background: hsl(var(--bg-300)); }
+        .dock-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .camera-only { display: none; }
+        @media (max-width: 760px) { .camera-only { display: inline-flex; } }
         .composer {
           display: flex;
           gap: 8px;
