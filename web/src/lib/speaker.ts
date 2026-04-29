@@ -55,24 +55,28 @@ export class Speaker {
   /** iOS unlock — call inside a user-gesture handler. */
   unlock() {
     if (!this.audio) this.audio = this.createAudioEl();
-    // Loading a 1-frame silent data URI inside a gesture is enough to mark the
-    // <audio> element as user-allowed for future src changes + plays on iOS.
+    const a = this.audio;
+    if (a.dataset.unlocked === "1") return;
     try {
-      const a = this.audio;
-      if (!a.dataset.unlocked) {
-        a.muted = true;
-        a.src =
-          "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
-        const p = a.play();
-        if (p && typeof p.then === "function") {
-          p.then(() => {
-            a.pause();
-            a.muted = false;
-            a.dataset.unlocked = "1";
-          }).catch(() => {
-            a.muted = false;
-          });
-        }
+      // Start playing 30s of silence right now so the element is in a
+      // "playing" state. We later swap src to real audio without losing the
+      // gesture grant. iOS only allows src→play if we're already playing
+      // OR still in a gesture. The silence keeps us "playing".
+      a.muted = false;
+      a.loop = true;
+      a.src =
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+      const p = a.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          a.dataset.unlocked = "1";
+          a.loop = false;
+        }).catch(() => {
+          /* user-gesture not granted — best effort */
+        });
+      } else {
+        a.dataset.unlocked = "1";
+        a.loop = false;
       }
     } catch {
       /* ignore */
