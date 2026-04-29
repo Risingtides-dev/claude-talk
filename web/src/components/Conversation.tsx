@@ -318,16 +318,14 @@ export function Conversation({
     // eslint-disable-next-line no-console
     console.log("[chat] send", { source, voiceMode, willSpeak, hasSpeaker: !!speakerRef.current });
     if (willSpeak) {
-      // Wake the AudioContext explicitly before any text starts streaming.
-      // We're synchronously inside a click/tap user-gesture handler chain
-      // here (sendStaged → send), which is the safe window iOS Safari
-      // gives us to resume the context.
+      // Wake the AudioContext explicitly while we're inside the user-gesture
+      // callstack, then clear any prior turn's audio.
       try {
         speakerRef.current?.unlock();
       } catch {
         /* ignore */
       }
-      speakerRef.current?.begin();
+      speakerRef.current?.cancel();
       setMicState("speaking");
     } else {
       setMicState("idle");
@@ -347,6 +345,37 @@ export function Conversation({
         signal: ac.signal,
       });
       if (!res.body) throw new Error("No stream");
+      // Sentence-streaming TTS buffer. Each completed sentence becomes its
+      // own WAV in the speaker queue so playback starts within a couple
+      // seconds instead of waiting for the whole turn.
+      let ttsPending = "";
+      const flushSentence = (force = false) => {
+        if (!willSpeak) return;
+        // Find the last sentence-ender in the pending buffer.
+        const re = /([.!?]+|\n+)(\s|$)/g;
+        let lastEnd = -1;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(ttsPending)) !== null) {
+          lastEnd = m.index + m[1].length;
+        }
+        let chunk = "";
+        if (lastEnd > 0) {
+          chunk = ttsPending.slice(0, lastEnd).trim();
+          ttsPending = ttsPending.slice(lastEnd).trimStart();
+        } else if (force) {
+          chunk = ttsPending.trim();
+          ttsPending = "";
+        }
+        // Only flush meaningful chunks (avoid one-word fragments mid-stream)
+        if (!force && chunk.length < 12) {
+          // Put it back and wait for more text to arrive.
+          ttsPending = chunk + (ttsPending ? " " + ttsPending : "");
+          return;
+        }
+        if (chunk.length > 0) {
+          speakerRef.current?.enqueueChunk(chunk);
+        }
+      };
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -374,7 +403,10 @@ export function Conversation({
           } else if (data.type === "text" && typeof data.delta === "string") {
             acc += data.delta;
             setStreamText(acc);
-            if (willSpeak) speakerRef.current?.push(data.delta);
+            if (willSpeak) {
+              ttsPending += data.delta;
+              flushSentence(false);
+            }
           } else if (data.type === "tool" && typeof data.summary === "string") {
             tools.push(data.summary);
             setStreamTools([...tools]);
@@ -387,10 +419,8 @@ export function Conversation({
             setStreamTools([]);
             setStreaming(false);
             if (willSpeak) {
-              // Text deltas have been accumulating in the speaker buffer
-              // throughout the turn. Just finalize so it speaks the whole
-              // thing as one contiguous wav.
-              speakerRef.current?.end();
+              // Flush whatever's left as the final sentence chunk.
+              flushSentence(true);
               setMicState("idle");
             }
           } else if (data.type === "error") {

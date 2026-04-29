@@ -134,6 +134,27 @@ export class Speaker {
     }
   }
 
+  /**
+   * Append a chunk of text directly to the play queue without canceling
+   * anything currently queued or playing. Used for sentence-by-sentence
+   * streaming so each chunk plays back-to-back.
+   */
+  enqueueChunk(text: string) {
+    const t = text.trim();
+    if (!t) return;
+    try {
+      this.ensureCtx();
+    } catch {
+      /* ignore */
+    }
+    this.aborted = false;
+    this.lastTurnText = (this.lastTurnText + " " + t).trim();
+    if (this.status === "idle") this.setStatus("loading");
+    // eslint-disable-next-line no-console
+    console.log("[speaker] enqueueChunk", t.length, "chars");
+    this.enqueue(t);
+  }
+
   cancel() {
     this.aborted = true;
     this.queue = [];
