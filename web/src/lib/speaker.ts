@@ -183,7 +183,7 @@ export class Speaker {
     if (!this.current || !this.ctx) return;
     const buf = this.current.buffer;
     const t = Math.max(0, Math.min(seconds, buf.duration - 0.01));
-    this.restartFrom(buf, t);
+    void this.restartFrom(buf, t);
   }
 
   /** Skip relative to current position. */
@@ -246,8 +246,19 @@ export class Speaker {
 
   /* ---------------- Internals ---------------- */
 
-  private restartFrom(buf: AudioBuffer, offset: number, text?: string) {
+  private async restartFrom(buf: AudioBuffer, offset: number, text?: string) {
     if (!this.ctx) return;
+    // Always nudge the AudioContext awake before scheduling a source. iOS
+    // can suspend the context after backgrounding the PWA, audio interruptions,
+    // or simply on its own; without a resume here `source.start()` succeeds
+    // silently and you hear nothing.
+    if (this.ctx.state !== "running") {
+      try {
+        await this.ctx.resume();
+      } catch {
+        /* ignore — we'll still try to start the source */
+      }
+    }
     // Carry over existing text if we're restarting the same WAV (seek/skip)
     const carriedText = text ?? this.current?.text ?? "";
     // Stop any existing source, ignore its onended.
@@ -365,7 +376,7 @@ export class Speaker {
         if (next.gen !== this.gen) continue;
         if (!buf) continue;
 
-        this.restartFrom(buf, 0, next.text);
+        await this.restartFrom(buf, 0, next.text);
         const cur = this.current!;
         await cur.ended;
         if (this.current?.source === cur.source) {

@@ -318,6 +318,15 @@ export function Conversation({
     // eslint-disable-next-line no-console
     console.log("[chat] send", { source, voiceMode, willSpeak, hasSpeaker: !!speakerRef.current });
     if (willSpeak) {
+      // Wake the AudioContext explicitly before any text starts streaming.
+      // We're synchronously inside a click/tap user-gesture handler chain
+      // here (sendStaged → send), which is the safe window iOS Safari
+      // gives us to resume the context.
+      try {
+        speakerRef.current?.unlock();
+      } catch {
+        /* ignore */
+      }
       speakerRef.current?.begin();
       setMicState("speaking");
     } else {
