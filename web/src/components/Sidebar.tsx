@@ -110,7 +110,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="sidebar-head">
-        <div className="brand">Voice Agent</div>
+        <div className="brand">Claude Talk</div>
         <div className="sort-toggle" role="tablist">
           <button
             role="tab"
@@ -378,6 +378,22 @@ function Row({
         }
         .time {
           margin-left: auto;
+        }
+        @media (max-width: 760px) {
+          .row {
+            padding: 7px 10px;
+          }
+          .title {
+            font-size: 12.5px;
+          }
+          .meta {
+            font-size: 10.5px;
+            gap: 6px;
+          }
+          .worktree,
+          .branch {
+            display: none;
+          }
         }
       `}</style>
     </button>

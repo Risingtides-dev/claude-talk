@@ -17,5 +17,5 @@ const httpServer = createServer((req, res) => {
 });
 
 httpServer.listen(port, hostname, () => {
-  console.log(`▸ Voice Agent ready at http://${hostname}:${port}`);
+  console.log(`▸ Claude Talk ready at http://${hostname}:${port}`);
 });

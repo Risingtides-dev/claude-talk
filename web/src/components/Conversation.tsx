@@ -530,13 +530,18 @@ export function Conversation({
           .conv { padding-top: 48px; }
           .topstrip { display: none; }
           .voice-controls { display: none; }
-          .kbd-toggle { display: none; }
           .speed { display: none; }
+          .kbd-toggle {
+            font-size: 12px;
+            padding: 6px 12px;
+            margin-top: 6px;
+          }
           .dock {
-            padding: 0 0 calc(env(safe-area-inset-bottom, 0) + 24px) 0;
-            gap: 0;
+            padding: 0 0 calc(env(safe-area-inset-bottom, 0) + 18px) 0;
+            gap: 4px;
             min-height: 38dvh;
             justify-content: center;
+            align-items: center;
           }
           .dock :global(.mic) {
             width: 110px !important;
@@ -547,6 +552,15 @@ export function Conversation({
             height: 22px !important;
           }
           .dock :global(.hint) { font-size: 13px !important; }
+          .composer {
+            width: 92%;
+            max-width: 92%;
+            padding: 0 16px;
+            margin-top: 6px;
+          }
+          .composer-input {
+            font-size: 16px; /* prevents iOS zoom on focus */
+          }
         }
         .conv {
           display: flex;
