@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>iOS PWA Audio Test</title>
+<style>
+  body { font: 16px system-ui; padding: 24px; background:#191814; color:#eee; }
+  button { display:block; width:100%; padding:18px; margin:10px 0; font-size:18px; background:#cb6d4e; color:#fff; border:none; border-radius:10px; }
+  pre { background:#000; padding:10px; border-radius:6px; max-height:50vh; overflow:auto; font-size:11px; }
+</style>
+</head>
+<body>
+<h2>Audio test</h2>
+<p>Tap each button. Tell me which one makes a sound.</p>
+<button id="b1">1) Inline data URI sine wave (HTMLAudio)</button>
+<button id="b2">2) Fetch /api/tts then HTMLAudio.play</button>
+<button id="b3">3) Fetch /api/tts then WebAudio decode+play</button>
+<button id="b4">4) Native AudioContext beep (WebAudio osc)</button>
+<pre id="log"></pre>
+<script>
+const log = (m) => { document.getElementById("log").textContent += m + "\n"; };
+
+// Pre-cooked 1s 440Hz sine WAV as a data URI (small, valid WAV).
+const SINE = "data:audio/wav;base64,UklGRiSwAQBXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQCwAQB/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/f39/";
+
+document.getElementById("b1").onclick = async () => {
+  log("[1] HTMLAudio data URI…");
+  const a = new Audio(SINE);
+  try { await a.play(); log("[1] play() resolved"); } catch (e) { log("[1] play() rejected: " + e); }
+};
+
+document.getElementById("b2").onclick = async () => {
+  log("[2] fetch /api/tts → HTMLAudio…");
+  try {
+    const res = await fetch("/api/tts", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({text:"hello", voice:"claude"})});
+    log("[2] tts status: " + res.status);
+    const ab = await res.arrayBuffer();
+    log("[2] bytes: " + ab.byteLength);
+    const url = URL.createObjectURL(new Blob([ab], {type:"audio/wav"}));
+    const a = new Audio(url);
+    a.onended = () => log("[2] ended");
+    a.onerror = (e) => log("[2] audio error: " + a.error?.code);
+    await a.play();
+    log("[2] play() resolved (you should hear it)");
+  } catch (e) { log("[2] failed: " + e); }
+};
+
+document.getElementById("b3").onclick = async () => {
+  log("[3] fetch /api/tts → WebAudio…");
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    if (ctx.state !== "running") await ctx.resume();
+    const res = await fetch("/api/tts", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({text:"hello", voice:"claude"})});
+    const ab = await res.arrayBuffer();
+    log("[3] bytes: " + ab.byteLength + " ctx state: " + ctx.state);
+    const buf = await ctx.decodeAudioData(ab.slice(0));
+    log("[3] decoded: " + buf.duration.toFixed(2) + "s");
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(0);
+    log("[3] started");
+  } catch (e) { log("[3] failed: " + e); }
+};
+
+document.getElementById("b4").onclick = async () => {
+  log("[4] WebAudio oscillator beep…");
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    if (ctx.state !== "running") await ctx.resume();
+    const osc = ctx.createOscillator();
+    osc.type = "sine"; osc.frequency.value = 440;
+    osc.connect(ctx.destination);
+    osc.start();
+    setTimeout(() => { osc.stop(); log("[4] stopped"); }, 600);
+    log("[4] started, ctx state: " + ctx.state);
+  } catch (e) { log("[4] failed: " + e); }
+};
+</script>
+</body>
+</html>
