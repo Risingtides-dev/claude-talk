@@ -473,6 +473,17 @@ export function Conversation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transport, posTick]);
 
+  // Karaoke snapshot: which sentence is playing right now and how far through
+  // it the playhead is. Re-derived every 100ms via posTick.
+  const karaoke = useMemo(() => {
+    const sp = speakerRef.current;
+    if (!sp || liveTransport.status !== "playing") {
+      return { text: "", charProgress: 0 };
+    }
+    return sp.karaoke();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveTransport.status, posTick]);
+
   if (!session) {
     return (
       <main className="conv">
@@ -503,15 +514,43 @@ export function Conversation({
         {!loading && turns.length === 0 && (
           <div className="empty">No turns yet — say something.</div>
         )}
-        {turns.map((t) =>
-          t.kind === "user" ? (
-            <UserBubble key={t.key} text={t.text} />
-          ) : (
-            <AssistantBubble key={t.key} text={t.text} tools={t.tools} />
-          ),
-        )}
+        {turns.map((t, i) => {
+          if (t.kind === "user") {
+            return <UserBubble key={t.key} text={t.text} />;
+          }
+          // Only the most-recent assistant bubble gets the live karaoke
+          // highlight (and only while audio is actually playing on it).
+          const isLastAssistant =
+            !streaming &&
+            i === turns.length - 1 &&
+            karaoke.text.length > 0 &&
+            t.text.includes(karaoke.text);
+          return (
+            <AssistantBubble
+              key={t.key}
+              text={t.text}
+              tools={t.tools}
+              activeText={isLastAssistant ? karaoke.text : undefined}
+              charProgress={isLastAssistant ? karaoke.charProgress : undefined}
+            />
+          );
+        })}
         {streaming && (
-          <AssistantBubble text={streamText} tools={streamTools} streaming />
+          <AssistantBubble
+            text={streamText}
+            tools={streamTools}
+            streaming
+            activeText={
+              karaoke.text.length > 0 && streamText.includes(karaoke.text)
+                ? karaoke.text
+                : undefined
+            }
+            charProgress={
+              karaoke.text.length > 0 && streamText.includes(karaoke.text)
+                ? karaoke.charProgress
+                : undefined
+            }
+          />
         )}
       </div>
 
@@ -1030,13 +1069,66 @@ function AssistantBubble({
   text,
   tools,
   streaming,
+  activeText,
+  charProgress,
 }: {
   text: string;
   tools: string[];
   streaming?: boolean;
+  activeText?: string;
+  charProgress?: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const hasTools = tools.length > 0;
+
+  // Figure out the karaoke "active region" inside this bubble's text. We
+  // compute it once per render: find the activeText substring inside text,
+  // then within that substring find which word the playhead is currently on
+  // (charProgress is 0..1 of the substring).
+  const activeRange = (() => {
+    if (!activeText || !text) return null;
+    const idx = text.indexOf(activeText);
+    if (idx < 0) return null;
+    const subStart = idx;
+    const subLen = activeText.length;
+    const charPos = Math.max(0, Math.min(1, charProgress ?? 0)) * subLen;
+    // Walk words inside the substring; find which word's char range covers
+    // (or just passed) the playhead position.
+    const wordRe = /\S+/g;
+    let m: RegExpExecArray | null;
+    let lastWord: { start: number; end: number } | null = null;
+    while ((m = wordRe.exec(activeText)) !== null) {
+      lastWord = { start: m.index, end: m.index + m[0].length };
+      if (m.index + m[0].length >= charPos) break;
+    }
+    if (!lastWord) return null;
+    return {
+      start: subStart + lastWord.start,
+      end: subStart + lastWord.end,
+    };
+  })();
+
+  const renderText = () => {
+    if (!activeRange) {
+      return (
+        <>
+          {text}
+          {streaming && <span className="caret">▍</span>}
+        </>
+      );
+    }
+    return (
+      <>
+        {text.slice(0, activeRange.start)}
+        <span className="active-word">
+          {text.slice(activeRange.start, activeRange.end)}
+        </span>
+        {text.slice(activeRange.end)}
+        {streaming && <span className="caret">▍</span>}
+      </>
+    );
+  };
+
   return (
     <div className="bubble assistant">
       {hasTools && (
@@ -1058,12 +1150,7 @@ function AssistantBubble({
           ))}
         </ul>
       )}
-      {text && (
-        <div className="text">
-          {text}
-          {streaming && <span className="caret">▍</span>}
-        </div>
-      )}
+      {text && <div className="text">{renderText()}</div>}
       <style jsx>{`
         .bubble {
           padding: 8px 24px;
@@ -1086,6 +1173,15 @@ function AssistantBubble({
         }
         @keyframes blink {
           50% { opacity: 0; }
+        }
+        .active-word {
+          background: hsl(var(--clay) / 0.18);
+          color: hsl(var(--clay));
+          border-radius: 3px;
+          padding: 1px 2px;
+          margin: 0 -2px;
+          transition: background var(--dur-fast) var(--ease),
+            color var(--dur-fast) var(--ease);
         }
         .tools {
           display: inline-flex;
