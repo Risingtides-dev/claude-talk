@@ -111,26 +111,44 @@ export class Speaker {
   }
 
   push(delta: string) {
-    // Auto-revive after a prior end(): the SDK fires multiple result events
-    // per turn, and each may be followed by more text deltas. We want each
-    // begin/end cycle to enqueue its own WAV in the play queue, with new
-    // pushes after an end implicitly starting the next one.
     if (!this.active) {
       this.active = true;
     }
     this.buffer += delta;
+    this.flushSentences(false);
   }
 
   end() {
     if (!this.active) return;
-    const whole = this.buffer.trim();
-    this.buffer = "";
+    this.flushSentences(true);
     this.active = false;
-    if (whole.length > 0) {
-      this.lastTurnText = whole;
-      // eslint-disable-next-line no-console
-      console.log("[speaker] end() — enqueue", whole.length, "chars");
-      this.enqueue(whole);
+    if (this.lastTurnAccum.trim().length > 0) {
+      this.lastTurnText = this.lastTurnAccum.trim();
+    }
+    this.lastTurnAccum = "";
+  }
+
+  // Streaming sentence flush: enqueue each completed sentence the moment it
+  // arrives. Runs strictly serial via the existing tick lock.
+  private lastTurnAccum = "";
+  private flushSentences(includeRemainder: boolean) {
+    const re = /([^.!?\n]+[.!?]+(?=\s|$)|[^.!?\n]+\n)/g;
+    let m: RegExpExecArray | null;
+    let lastIndex = 0;
+    while ((m = re.exec(this.buffer)) !== null) {
+      const piece = m[0].trim();
+      if (piece) {
+        this.lastTurnAccum += piece + " ";
+        this.enqueue(piece);
+      }
+      lastIndex = re.lastIndex;
+    }
+    if (lastIndex > 0) this.buffer = this.buffer.slice(lastIndex);
+    if (includeRemainder && this.buffer.trim().length > 0) {
+      const tail = this.buffer.trim();
+      this.lastTurnAccum += tail + " ";
+      this.enqueue(tail);
+      this.buffer = "";
     }
   }
 

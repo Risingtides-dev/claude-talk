@@ -32,6 +32,7 @@ export function Mic({
   onSeek,
   hasStaged,
   onSendStaged,
+  onProof,
   onLivePartial,
 }: {
   state: MicState;
@@ -52,6 +53,10 @@ export function Mic({
   // (transcript will be appended to the staged text in the composer).
   hasStaged?: boolean;
   onSendStaged?: () => void;
+  // Whisper proofreading: live transcript landed first; whisper runs in the
+  // background and calls this with (oldLive, newWhisper) if it differs so
+  // the composer can swap the staged text without making the user wait.
+  onProof?: (oldText: string, newText: string) => void;
   // Live transcription. Fires interim partials while the user is still
   // holding the mic, so the composer can fill in real-time.
   onLivePartial?: (interim: string) => void;
@@ -240,20 +245,40 @@ export function Mic({
         return;
       }
       // If we have a usable live transcript from browser SpeechRecognition,
-      // skip the whisper round-trip entirely. The user already saw their
-      // words land in the composer; making them wait on transcribing just
-      // to upgrade quality isn't worth the latency.
+      // hand that back IMMEDIATELY so the UI doesn't stall, then run whisper
+      // in the background as a proofreader and patch in the corrected text
+      // when it lands.
       const live = lastLiveRef.current.trim();
       if (live.length > 0) {
-        log("using live transcript, skipping whisper:", live);
+        log("using live transcript, whisper proof in background:", live);
         setLastHeard(live);
         phaseRef.current = { kind: "idle" };
         onTranscript(live, 0);
+        // Background: run whisper for proofreading. Fire-and-forget; if it
+        // succeeds, hand the corrected text back so the parent can swap it
+        // in. If it fails, no harm — user already has the live version.
+        void (async () => {
+          try {
+            const fd = new FormData();
+            const ext = (mr.mimeType.split("/")[1] ?? "webm").split(";")[0];
+            fd.append("audio", blob, `clip.${ext}`);
+            const res = await fetch("/api/stt", { method: "POST", body: fd });
+            if (!res.ok) return;
+            const j = await res.json();
+            const text = (j?.text ?? "").trim();
+            if (text.length > 0 && text !== live) {
+              log("whisper proof correction:", text);
+              onProof?.(live, text);
+            }
+          } catch (err) {
+            log("background whisper failed (non-fatal):", err);
+          }
+        })();
         return;
       }
 
       // No live transcript (e.g. Firefox / SpeechRecognition unavailable).
-      // Fall back to whisper.
+      // Fall back to whisper synchronously.
       onState("transcribing");
       const slowTimer = setTimeout(() => setSlowHint(true), 8000);
       try {

@@ -6,20 +6,54 @@ import path from "node:path";
 const WHISPER_MODEL =
   process.env.WHISPER_MODEL ?? "mlx-community/whisper-large-v3-turbo";
 const STT_RUNNER = process.env.STT_RUNNER ?? "uvx";
+const STT_DAEMON_URL = process.env.STT_DAEMON_URL ?? "http://127.0.0.1:7891";
 
 export type TranscribeResult = {
   text: string;
   ms: number;
 };
 
-export async function transcribeAudio(buf: Buffer, ext = "webm"): Promise<TranscribeResult> {
+/**
+ * Talk to the persistent whisper daemon. Way faster than spawning a fresh
+ * uvx process per request because the model stays loaded.
+ */
+async function transcribeViaDaemon(
+  buf: Buffer,
+  ext: string,
+): Promise<TranscribeResult | null> {
+  try {
+    const fd = new FormData();
+    const blob = new Blob([new Uint8Array(buf)]);
+    fd.append("audio", blob, `clip.${ext}`);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 30_000);
+    const res = await fetch(`${STT_DAEMON_URL}/transcribe`, {
+      method: "POST",
+      body: fd,
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const j = (await res.json()) as { text?: string; ms?: number };
+    return { text: (j.text ?? "").trim(), ms: j.ms ?? 0 };
+  } catch {
+    return null;
+  }
+}
+
+export async function transcribeAudio(
+  buf: Buffer,
+  ext = "webm",
+): Promise<TranscribeResult> {
+  // Try the persistent daemon first; fall back to subprocess if it's down.
+  const fast = await transcribeViaDaemon(buf, ext);
+  if (fast) return fast;
+
   const dir = mkdtempSync(path.join(tmpdir(), "voice-agent-stt-"));
   const inputPath = path.join(dir, `input.${ext}`);
   const wavPath = path.join(dir, `clip.wav`);
   writeFileSync(inputPath, buf);
 
-  // Convert to 16k mono wav with ffmpeg first; mlx-whisper accepts many formats
-  // but a clean wav is the most reliable, fastest path.
   await runCmd("ffmpeg", [
     "-y",
     "-i",

@@ -699,6 +699,17 @@ export function Conversation({
           hasStaged={input.trim().length > 0 && !streaming}
           onSendStaged={sendStaged}
           onLivePartial={handleLivePartial}
+          onProof={(oldText, newText) => {
+            // Background whisper finished. Swap the live transcript with the
+            // proofread version inside the composer (input). Only patch if
+            // the user hasn't already sent or aggressively edited away from
+            // the live text.
+            setInput((cur) => {
+              if (!cur) return cur;
+              if (cur.includes(oldText)) return cur.replace(oldText, newText);
+              return cur;
+            });
+          }}
         />
         <div className="speed">
           <label htmlFor="speed-slider" title={`Playback ${speed.toFixed(2)}x`}>
