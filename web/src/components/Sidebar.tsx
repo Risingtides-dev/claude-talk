@@ -28,12 +28,6 @@ function projectLabel(s: Session): string {
   return projectNameFromCwd(s.cwd);
 }
 
-function worktreeLabel(s: Session): string | null {
-  if (!s.isWorktree) return null;
-  if (s.folderName && s.folderName !== s.repoName) return s.folderName;
-  return null;
-}
-
 type SortMode = "date" | "project";
 
 export function Sidebar({
@@ -157,23 +151,10 @@ export function Sidebar({
           grouped?.map(([key, list]) => {
             const head = list[0];
             const label = projectLabel(head);
-            const gh = head.github;
             return (
               <div key={key} className="group">
                 <div className="group-head">
                   <span>{label}</span>
-                  {gh && (
-                    <a
-                      className="gh"
-                      href={gh.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      title={`${gh.owner}/${gh.name} on GitHub`}
-                    >
-                      ↗
-                    </a>
-                  )}
                 </div>
                 {list.map((s) => (
                   <Row
@@ -308,14 +289,6 @@ function Row({
       <div className="meta">
         {!hideProject && (
           <span className="project">{projectLabel(session)}</span>
-        )}
-        {worktreeLabel(session) && (
-          <span className="worktree">· {worktreeLabel(session)}</span>
-        )}
-        {session.gitBranch && (
-          <span className="branch" title={`Branch ${session.gitBranch}`}>
-            ⎇ {session.gitBranch}
-          </span>
         )}
         <span className="time" suppressHydrationWarning>
           {relativeTime(session.lastModified)}
