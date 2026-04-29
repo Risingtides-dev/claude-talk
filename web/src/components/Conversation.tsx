@@ -132,6 +132,10 @@ export function Conversation({
     "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto"
   >("bypassPermissions");
   const [micState, setMicState] = useState<MicState>("idle");
+  // Live partial transcript fed by the browser SpeechRecognition while the
+  // user is still holding the mic. Cleared when the final whisper transcript
+  // arrives via handleTranscript.
+  const [livePartial, setLivePartial] = useState<string>("");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -427,12 +431,18 @@ export function Conversation({
 
   function handleTranscript(text: string, _ms: number) {
     setMicState("idle");
-    // Stage the transcript instead of auto-sending. The composer pops up
-    // with the text pre-filled so the user can edit before tapping the mic
-    // circle (which becomes a Send button while text is staged) or the
-    // composer's Send button.
+    setLivePartial("");
+    // Stage the (whisper-accurate) transcript instead of auto-sending. The
+    // composer is already visible because the live partial revealed it
+    // during recording. The whisper text replaces / appends to what's there.
     setShowInput(true);
     setInput((cur) => (cur ? `${cur} ${text}` : text));
+  }
+
+  function handleLivePartial(partial: string) {
+    if (!partial) return;
+    setShowInput(true);
+    setLivePartial(partial);
   }
 
   function sendStaged() {
@@ -570,6 +580,7 @@ export function Conversation({
           onSeek={(t: number) => speakerRef.current?.seek(t)}
           hasStaged={input.trim().length > 0 && !streaming}
           onSendStaged={sendStaged}
+          onLivePartial={handleLivePartial}
         />
         <div className="speed">
           <label htmlFor="speed-slider" title={`Playback ${speed.toFixed(2)}x`}>
@@ -686,9 +697,16 @@ export function Conversation({
                 const max = 220;
                 el.style.height = Math.min(el.scrollHeight, max) + "px";
               }}
-              className="composer-input"
+              className={`composer-input ${micState === "recording" && livePartial ? "is-listening" : ""}`}
               placeholder="Type a message…  (Enter to send, Shift+Enter for newline)"
-              value={input}
+              value={
+                micState === "recording" && livePartial
+                  ? input
+                    ? `${input} ${livePartial}`
+                    : livePartial
+                  : input
+              }
+              readOnly={micState === "recording" && !!livePartial}
               onChange={(e) => {
                 setInput(e.target.value);
                 const el = e.currentTarget;
@@ -962,6 +980,12 @@ export function Conversation({
         .composer-input:focus {
           outline: none;
           border-color: hsl(var(--clay) / 0.4);
+        }
+        .composer-input.is-listening {
+          border-color: hsl(var(--clay) / 0.55);
+          background: hsl(var(--clay) / 0.04);
+          color: hsl(var(--text-200));
+          font-style: italic;
         }
         .send {
           padding: 0 16px;

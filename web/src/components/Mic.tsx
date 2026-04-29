@@ -32,6 +32,7 @@ export function Mic({
   onSeek,
   hasStaged,
   onSendStaged,
+  onLivePartial,
 }: {
   state: MicState;
   onState: (s: MicState) => void;
@@ -51,6 +52,9 @@ export function Mic({
   // (transcript will be appended to the staged text in the composer).
   hasStaged?: boolean;
   onSendStaged?: () => void;
+  // Live transcription. Fires interim partials while the user is still
+  // holding the mic, so the composer can fill in real-time.
+  onLivePartial?: (interim: string) => void;
 }) {
   const phaseRef = useRef<Phase>({ kind: "idle" });
   const heldRef = useRef(false);
@@ -74,6 +78,14 @@ export function Mic({
   // Distinguish tap (pause/resume) from press-and-hold (record)
   const pressTimerRef = useRef<number | null>(null);
   const longPressTriggeredRef = useRef(false);
+
+  // Live transcription (browser SpeechRecognition). Only used for the
+  // visual streaming-into-the-composer effect; the *final* transcript is
+  // always whisper. We keep one live recognizer across the session so it
+  // doesn't re-prompt or warm up on each press.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
+  const liveBaseRef = useRef<string>(""); // committed text from prior final results in this press
 
   const log = (...args: unknown[]) => {
     // eslint-disable-next-line no-console
@@ -106,6 +118,61 @@ export function Mic({
     const s = cachedStreamRef.current;
     if (!s) return;
     s.getAudioTracks().forEach((t) => (t.enabled = false));
+  }
+
+  function startLiveRecognition() {
+    if (!onLivePartial) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const SR = w.SpeechRecognition ?? w.webkitSpeechRecognition;
+    if (!SR) return; // Browser doesn't support it (Firefox); silently skip.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rec: any = new SR();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = (navigator.language || "en-US").startsWith("en")
+        ? navigator.language
+        : "en-US";
+      liveBaseRef.current = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rec.onresult = (event: any) => {
+        let interim = "";
+        let finalBatch = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const r = event.results[i];
+          const t = r[0]?.transcript ?? "";
+          if (r.isFinal) finalBatch += t;
+          else interim += t;
+        }
+        if (finalBatch) {
+          liveBaseRef.current = (liveBaseRef.current + " " + finalBatch).trim();
+        }
+        const merged = (liveBaseRef.current + " " + interim).trim();
+        onLivePartial?.(merged);
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      rec.onerror = (e: any) => {
+        log("speechrecognition error:", e?.error);
+      };
+      rec.start();
+      recognitionRef.current = rec;
+    } catch (err) {
+      log("speechrecognition start failed:", err);
+    }
+  }
+
+  function stopLiveRecognition() {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+    try {
+      rec.onresult = null;
+      rec.onerror = null;
+      rec.stop();
+    } catch {
+      /* ignore */
+    }
+    recognitionRef.current = null;
   }
 
   async function start() {
@@ -160,6 +227,7 @@ export function Mic({
     mr.onstop = async () => {
       log("recorder stopped, chunk count:", chunks.length);
       parkStream();
+      stopLiveRecognition();
       const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
       log("blob size:", blob.size, "type:", blob.type);
       if (blob.size < 800) {
@@ -200,6 +268,7 @@ export function Mic({
     mr.start();
     phaseRef.current = { kind: "recording", mr, stream };
     onState("recording");
+    startLiveRecognition();
     log("recording started");
   }
 
@@ -208,10 +277,12 @@ export function Mic({
     const p = phaseRef.current;
     if (p.kind === "starting") {
       p.cancelRequested = true;
+      stopLiveRecognition();
       return;
     }
     if (p.kind !== "recording") return;
     phaseRef.current = { kind: "stopping" };
+    stopLiveRecognition();
     if (p.mr.state === "recording") p.mr.stop();
   }
 
@@ -258,6 +329,7 @@ export function Mic({
       }
       // Fully release the cached stream when the component unmounts so the
       // mic indicator goes away.
+      stopLiveRecognition();
       stopStream(cachedStreamRef.current);
       cachedStreamRef.current = null;
       if (pressTimerRef.current) {
