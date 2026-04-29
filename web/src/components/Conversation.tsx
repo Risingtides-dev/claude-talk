@@ -43,8 +43,11 @@ function summarizeTool(name: string, input: unknown): string {
 
 function stripVoicePreamble(s: string): string {
   // Legacy: older sessions have the wrapper baked into the user message.
-  // Strip both the original preamble and any leading [Voice mode ...] block.
-  return s.replace(/^\[Voice mode[\s\S]*?\]\s*/m, "");
+  // Strip both the original preamble and any leading [Voice mode ...] block,
+  // and the new short [ct] mode tag.
+  return s
+    .replace(/^\[Voice mode[\s\S]*?\]\s*/m, "")
+    .replace(/^\[ct\]\s*/m, "");
 }
 
 function flattenMessages(raw: RawMessage[]): Turn[] {

@@ -45,8 +45,14 @@ export async function runChatTurn(args: ChatTurnArgs): Promise<void> {
     else args.signal.addEventListener("abort", () => ac.abort());
   }
 
+  // Tag every Claude Talk prompt so the global CLAUDE.md routing rules
+  // know to switch to concise voice-friendly mode for this turn. Desktop
+  // sessions that resume the same chat won't have this tag on their own
+  // turns, so they behave normally.
+  const taggedPrompt = `[ct] ${args.prompt}`;
+
   const iter = query({
-    prompt: args.prompt,
+    prompt: taggedPrompt,
     options: {
       cwd: args.cwd,
       resume: args.sessionId,
