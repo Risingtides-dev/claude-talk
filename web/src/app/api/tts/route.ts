@@ -19,7 +19,12 @@ export async function POST(req: NextRequest) {
       text,
       voice: typeof body.voice === "string" ? body.voice : undefined,
     });
-    const audio = new Uint8Array(wav.buffer, wav.byteOffset, wav.byteLength);
+    // Slice into a new ArrayBuffer so the Response body type checks across
+    // ArrayBufferLike unions in newer @types/node + DOM lib combinations.
+    const audio = wav.buffer.slice(
+      wav.byteOffset,
+      wav.byteOffset + wav.byteLength,
+    ) as ArrayBuffer;
     return new Response(audio, {
       headers: {
         "Content-Type": "audio/wav",
