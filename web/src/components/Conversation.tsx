@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { projectNameFromCwd } from "@/lib/format";
 import { Mic } from "./Mic";
 import { Speaker } from "@/lib/speaker";
+import { FilePicker } from "./FilePicker";
 
 type SessionMeta = {
   sessionId: string;
@@ -95,6 +96,7 @@ export function Conversation({
   const [streamTools, setStreamTools] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [showInput, setShowInput] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [voiceMode, setVoiceMode] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [voiceName, setVoiceName] = useState<string>("claude");
@@ -497,14 +499,40 @@ export function Conversation({
             aria-label="Playback speed"
           />
         </div>
-        <button
-          className="kbd-toggle"
-          onClick={() => setShowInput((v) => !v)}
-          aria-label="Toggle keyboard input"
-          title="Type instead"
-        >
-          {showInput ? "Hide keyboard" : "Type instead"}
-        </button>
+        <div className="dock-actions">
+          <button
+            className="dock-btn"
+            onClick={() => setPickerOpen(true)}
+            aria-label="Attach file from disk"
+            title="Attach file"
+          >
+            📎
+          </button>
+          <button
+            className="kbd-toggle"
+            onClick={() => setShowInput((v) => !v)}
+            aria-label="Toggle keyboard input"
+            title="Type instead"
+          >
+            {showInput ? "Hide keyboard" : "Type"}
+          </button>
+        </div>
+        {pickerOpen && (
+          <FilePicker
+            startDir={session?.cwd}
+            onClose={() => setPickerOpen(false)}
+            onPick={(p) => {
+              setPickerOpen(false);
+              setShowInput(true);
+              // Append the absolute path into the input as a quoted reference
+              // the agent will pick up via Read tool.
+              setInput((cur) => {
+                const ref = `"${p}"`;
+                return cur ? `${cur} ${ref}` : ref;
+              });
+            }}
+          />
+        )}
         {showInput && (
           <form className="composer" onSubmit={handleSubmit}>
             <input
@@ -694,6 +722,21 @@ export function Conversation({
           transition: color var(--dur-fast) var(--ease);
         }
         .kbd-toggle:hover { color: hsl(var(--text-200)); }
+        .dock-actions {
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          margin-top: 6px;
+        }
+        .dock-btn {
+          font-size: 16px;
+          padding: 6px 10px;
+          border-radius: var(--radius-md);
+          background: hsl(var(--bg-200));
+          color: hsl(var(--text-200));
+          transition: background var(--dur-fast) var(--ease);
+        }
+        .dock-btn:hover { background: hsl(var(--bg-300)); }
         .composer {
           display: flex;
           gap: 8px;
