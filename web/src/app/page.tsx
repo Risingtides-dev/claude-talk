@@ -100,8 +100,9 @@ export default function Page() {
             top: 0;
             left: 0;
             right: 0;
-            height: 48px;
-            padding: 0 14px;
+            /* Reserve space for the iOS status bar in PWA standalone mode */
+            height: calc(48px + env(safe-area-inset-top, 0px));
+            padding: env(safe-area-inset-top, 0px) 14px 0 14px;
             z-index: 30;
             background: hsl(var(--bg-100));
             border-bottom: 1px solid hsl(var(--border-300) / 0.12);
@@ -123,7 +124,7 @@ export default function Page() {
           .mobile-picker {
             display: block;
             position: fixed;
-            top: 48px;
+            top: calc(48px + env(safe-area-inset-top, 0px));
             left: 0;
             right: 0;
             bottom: 0;

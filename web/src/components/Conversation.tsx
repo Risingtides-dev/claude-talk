@@ -807,7 +807,8 @@ export function Conversation({
 
       <style jsx>{`
         @media (max-width: 760px) {
-          .conv { padding-top: 48px; }
+          /* Match the mobile topbar height: 48px + iOS status bar inset */
+          .conv { padding-top: calc(48px + env(safe-area-inset-top, 0px)); }
           .topstrip { display: none; }
           .voice-controls { display: none; }
           .speed { display: none; }
