@@ -17,6 +17,12 @@ export type TransportState = {
   hasAudio: boolean;    // true once a buffer has been decoded for the active turn
 };
 
+/** Karaoke snapshot: which text is currently playing and how far into it we are. */
+export type KaraokeState = {
+  text: string;             // full text of the currently-playing WAV ("" if none)
+  charProgress: number;     // 0..1 fraction of text elapsed by playhead
+};
+
 type Job = {
   text: string;
   gen: number;
@@ -36,6 +42,7 @@ export class Speaker {
         startedAt: number; // ctx.currentTime when source.start was called
         offset: number;    // start offset in seconds passed to source.start
         completed: boolean;
+        text: string;      // sentence text powering this WAV (for karaoke)
       }
     | null = null;
   private queue: Job[] = [];
@@ -216,10 +223,25 @@ export class Speaker {
     };
   }
 
+  /**
+   * Snapshot of karaoke progress: which sentence is playing and how far into
+   * its text the playhead has elapsed (0..1 by character count). Bubbles use
+   * this to highlight the active word.
+   */
+  karaoke(): KaraokeState {
+    if (!this.current) return { text: "", charProgress: 0 };
+    const dur = this.current.buffer.duration;
+    const pos = this.position();
+    const frac = dur > 0 ? Math.max(0, Math.min(1, pos / dur)) : 0;
+    return { text: this.current.text, charProgress: frac };
+  }
+
   /* ---------------- Internals ---------------- */
 
-  private restartFrom(buf: AudioBuffer, offset: number) {
+  private restartFrom(buf: AudioBuffer, offset: number, text?: string) {
     if (!this.ctx) return;
+    // Carry over existing text if we're restarting the same WAV (seek/skip)
+    const carriedText = text ?? this.current?.text ?? "";
     // Stop any existing source, ignore its onended.
     if (this.current) {
       try {
@@ -259,6 +281,7 @@ export class Speaker {
       startedAt,
       offset,
       completed: false,
+      text: carriedText,
     };
     this.setStatus("playing");
   }
@@ -324,7 +347,7 @@ export class Speaker {
         if (next.gen !== this.gen) continue;
         if (!buf) continue;
 
-        this.restartFrom(buf, 0);
+        this.restartFrom(buf, 0, next.text);
         const cur = this.current!;
         await cur.ended;
         if (this.current?.source === cur.source) {
