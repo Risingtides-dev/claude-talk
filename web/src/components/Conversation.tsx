@@ -376,11 +376,9 @@ export function Conversation({
             setStreamTools([]);
             setStreaming(false);
             if (willSpeak) {
-              // Cancel any prior playback first so multi-result turns don't
-              // stack overlapping wavs of the same accumulated buffer.
-              speakerRef.current?.cancel();
-              speakerRef.current?.begin();
-              speakerRef.current?.push(acc);
+              // Text deltas have been accumulating in the speaker buffer
+              // throughout the turn. Just finalize so it speaks the whole
+              // thing as one contiguous wav.
               speakerRef.current?.end();
               setMicState("idle");
             }
