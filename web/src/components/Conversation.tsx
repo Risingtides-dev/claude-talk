@@ -315,6 +315,8 @@ export function Conversation({
     stickToBottom.current = true;
 
     const willSpeak = source === "voice" && voiceMode;
+    // eslint-disable-next-line no-console
+    console.log("[chat] send", { source, voiceMode, willSpeak, hasSpeaker: !!speakerRef.current });
     if (willSpeak) {
       speakerRef.current?.begin();
       setMicState("speaking");
@@ -849,11 +851,19 @@ export function Conversation({
             width: 100%;
             max-width: 100%;
             padding: 0;
-            margin-top: 4px;
+            margin-top: 0;
+            margin-bottom: 8px;
+            /* Pop above the mic circle on mobile so the user's thumb
+               doesn't cover the textbox during hold-to-talk. */
+            order: -1;
           }
           .composer-input {
             font-size: 16px; /* prevents iOS zoom on focus */
             min-height: 48px;
+          }
+          /* Pin the dock-actions row below the mic */
+          .dock-actions {
+            order: 1;
           }
         }
         .conv {

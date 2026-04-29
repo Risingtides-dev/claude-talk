@@ -128,6 +128,8 @@ export class Speaker {
     this.active = false;
     if (whole.length > 0) {
       this.lastTurnText = whole;
+      // eslint-disable-next-line no-console
+      console.log("[speaker] end() — enqueue", whole.length, "chars");
       this.enqueue(whole);
     }
   }
@@ -277,8 +279,11 @@ export class Speaker {
     const startedAt = this.ctx.currentTime;
     try {
       source.start(0, offset);
-    } catch {
-      /* ignore */
+      // eslint-disable-next-line no-console
+      console.log("[speaker] source.start at", offset, "ctx state:", this.ctx.state);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[speaker] source.start failed", err);
     }
     this.current = {
       source,
@@ -313,6 +318,8 @@ export class Speaker {
 
   private async fetchAndDecode(text: string): Promise<AudioBuffer | null> {
     try {
+      // eslint-disable-next-line no-console
+      console.log("[speaker] fetchAndDecode → /api/tts", { len: text.length, voice: this.prefs.voice ?? "claude" });
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -326,7 +333,12 @@ export class Speaker {
       }
       const ab = await res.arrayBuffer();
       const ctx = this.ensureCtx();
-      return await ctx.decodeAudioData(ab.slice(0));
+      // eslint-disable-next-line no-console
+      console.log("[speaker] tts → bytes:", ab.byteLength, "ctx state:", ctx.state);
+      const buf = await ctx.decodeAudioData(ab.slice(0));
+      // eslint-disable-next-line no-console
+      console.log("[speaker] decoded:", buf.duration.toFixed(2), "s");
+      return buf;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[speaker] fetch/decode failed", err);
