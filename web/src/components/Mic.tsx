@@ -86,6 +86,7 @@ export function Mic({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
   const liveBaseRef = useRef<string>(""); // committed text from prior final results in this press
+  const lastLiveRef = useRef<string>(""); // most recent merged live transcript shown in composer
 
   const log = (...args: unknown[]) => {
     // eslint-disable-next-line no-console
@@ -135,6 +136,7 @@ export function Mic({
         ? navigator.language
         : "en-US";
       liveBaseRef.current = "";
+      lastLiveRef.current = "";
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       rec.onresult = (event: any) => {
         let interim = "";
@@ -149,6 +151,7 @@ export function Mic({
           liveBaseRef.current = (liveBaseRef.current + " " + finalBatch).trim();
         }
         const merged = (liveBaseRef.current + " " + interim).trim();
+        lastLiveRef.current = merged;
         onLivePartial?.(merged);
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -236,6 +239,21 @@ export function Mic({
         onState("idle");
         return;
       }
+      // If we have a usable live transcript from browser SpeechRecognition,
+      // skip the whisper round-trip entirely. The user already saw their
+      // words land in the composer; making them wait on transcribing just
+      // to upgrade quality isn't worth the latency.
+      const live = lastLiveRef.current.trim();
+      if (live.length > 0) {
+        log("using live transcript, skipping whisper:", live);
+        setLastHeard(live);
+        phaseRef.current = { kind: "idle" };
+        onTranscript(live, 0);
+        return;
+      }
+
+      // No live transcript (e.g. Firefox / SpeechRecognition unavailable).
+      // Fall back to whisper.
       onState("transcribing");
       const slowTimer = setTimeout(() => setSlowHint(true), 8000);
       try {
