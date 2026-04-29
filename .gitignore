@@ -47,3 +47,7 @@ web/tsconfig.tsbuildinfo
 # TS incremental build cache
 web/tsconfig.tsbuildinfo
 
+
+# STT daemon venv
+stt/.venv/
+stt/__pycache__/
