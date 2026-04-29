@@ -54,13 +54,6 @@ export class Speaker {
   private lastTurnText = "";
   private nextSeq = 0; // assigns playback order at enqueue time
 
-  // Backchannel state: separate <audio> element + pre-cached blob URLs so
-  // the latency-killer is just an in-memory swap of `src` and a `play()`.
-  private backchannelAudio: HTMLAudioElement | null = null;
-  private backchannelUrls: string[] = [];
-  private backchannelLoading: Promise<void> | null = null;
-  private backchannelVoice: string | null = null; // voice key the cache was built against
-
   constructor(prefs: SpeakerPrefs = {}) {
     this.prefs = { rate: 1, ...prefs };
   }
@@ -114,104 +107,26 @@ export class Speaker {
   }
 
   /**
-   * Play a tiny "mhm"-style acknowledgment immediately, while the real
-   * response is still generating. Uses a separate <audio> element so it
-   * doesn't interfere with the main slot queue. Real TTS chunks preempt it
-   * via cancelBackchannel(). Safe to call from inside a user-gesture
-   * callstack — that's actually the point.
+   * Play a tiny "mhm"-style acknowledgment by enqueuing it as the first
+   * chunk of the upcoming turn. Goes through the same playback path as real
+   * TTS so it inherits the iOS audio unlock (which only applies to the main
+   * <audio> element). When real text starts streaming in, it just slots in
+   * after the backchannel — no second audio element, no separate unlock.
    */
-  async playBackchannel() {
+  playBackchannel() {
     if (this.aborted) return;
     // If a real chunk is already queued or playing, don't insert filler.
     if (this.queue.length > 0 || this.current) return;
-    try {
-      await this.ensureBackchannels();
-      const url = this.pickBackchannelUrl();
-      if (!url) return;
-      // Bail late: a real chunk may have arrived while we were warming.
-      if (this.queue.length > 0 || this.current || this.aborted) return;
-      let bc = this.backchannelAudio;
-      if (!bc) {
-        bc = new Audio();
-        bc.preload = "auto";
-        this.backchannelAudio = bc;
-      }
-      bc.src = url;
-      bc.currentTime = 0;
-      bc.volume = 0.85;
-      bc.playbackRate = this.prefs.rate ?? 1;
-      void bc.play().catch(() => {
-        /* gesture lost or audio still locked — best effort */
-      });
-    } catch {
-      /* never block the real response */
-    }
+    const phrase =
+      BACKCHANNEL_PHRASES[Math.floor(Math.random() * BACKCHANNEL_PHRASES.length)];
+    if (phrase) this.enqueueChunk(phrase);
   }
 
-  /** Stop any backchannel that's currently playing. Idempotent. */
+  /** No-op kept for callsite compatibility. Backchannel now plays through the
+   * main queue, so any real chunk naturally lines up after it without
+   * needing a separate cancel path. */
   cancelBackchannel() {
-    const bc = this.backchannelAudio;
-    if (!bc) return;
-    try {
-      if (!bc.paused) bc.pause();
-      bc.currentTime = 0;
-    } catch {
-      /* ignore */
-    }
-  }
-
-  private pickBackchannelUrl(): string | null {
-    if (this.backchannelUrls.length === 0) return null;
-    const idx = Math.floor(Math.random() * this.backchannelUrls.length);
-    return this.backchannelUrls[idx] ?? null;
-  }
-
-  private async ensureBackchannels(): Promise<void> {
-    const voice = this.prefs.voice ?? "claude";
-    if (
-      this.backchannelUrls.length > 0 &&
-      this.backchannelVoice === voice
-    ) {
-      return;
-    }
-    if (this.backchannelLoading) return this.backchannelLoading;
-    this.backchannelLoading = (async () => {
-      // Free any prior-voice cache.
-      for (const u of this.backchannelUrls) {
-        try {
-          URL.revokeObjectURL(u);
-        } catch {
-          /* ignore */
-        }
-      }
-      this.backchannelUrls = [];
-      const fresh: string[] = [];
-      // Render in parallel; ignore failures so even a partial cache works.
-      await Promise.all(
-        BACKCHANNEL_PHRASES.map(async (phrase) => {
-          try {
-            const res = await fetch("/api/tts", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ text: phrase, voice }),
-            });
-            if (!res.ok) return;
-            const ab = await res.arrayBuffer();
-            const blob = new Blob([new Uint8Array(ab)], { type: "audio/wav" });
-            fresh.push(URL.createObjectURL(blob));
-          } catch {
-            /* ignore */
-          }
-        }),
-      );
-      this.backchannelUrls = fresh;
-      this.backchannelVoice = voice;
-    })();
-    try {
-      await this.backchannelLoading;
-    } finally {
-      this.backchannelLoading = null;
-    }
+    /* intentional no-op */
   }
 
   /** Append a chunk and play it back when its turn comes up in the queue. */
@@ -251,7 +166,6 @@ export class Speaker {
 
   cancel() {
     this.aborted = true;
-    this.cancelBackchannel();
     // Free anything we already fetched, and unblock any pending waiters so
     // their fetch handlers can exit cleanly.
     for (const j of this.queue) {
@@ -475,9 +389,6 @@ export class Speaker {
           continue;
         }
         if (!this.audio) this.audio = this.createAudioEl();
-        // First real chunk is about to play — silence any backchannel that
-        // was bridging the gap so they don't double up.
-        this.cancelBackchannel();
         this.current = next;
         this.audio.src = next.url;
         this.audio.playbackRate = this.prefs.rate ?? 1;
@@ -529,45 +440,59 @@ export class Speaker {
 
   /**
    * Wire up the OS Media Session so the lock screen / AirPods / Bluetooth
-   * controls can pause/resume/skip the running TTS playback.
+   * controls can pause/resume/skip the running TTS playback. Cheap on every
+   * call: state + metadata only update when they actually change, action
+   * handlers register exactly once.
    */
+  private mediaSessionHandlersBound = false;
+  private lastMediaTitle = "";
+  private lastMediaState: "playing" | "paused" | "none" = "none";
   private updateMediaSession() {
     if (typeof navigator === "undefined") return;
     const ms = navigator.mediaSession;
     if (!ms) return;
     try {
-      // Reflect the current playback status on the lock screen.
-      ms.playbackState =
+      const desired: "playing" | "paused" | "none" =
         this.status === "playing"
           ? "playing"
           : this.status === "paused"
             ? "paused"
             : "none";
+      if (desired !== this.lastMediaState) {
+        ms.playbackState = desired;
+        this.lastMediaState = desired;
+      }
 
-      // Show the most recent assistant text as the "track title" so the
-      // lock screen displays a useful preview instead of "Untitled".
       const title =
         this.current?.text?.slice(0, 80) ||
         this.lastTurnText.slice(0, 80) ||
         "Claude is talking…";
-      ms.metadata = new MediaMetadata({
-        title,
-        artist: "Claude",
-        album: "Claude Talk",
-        artwork: [
-          { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
-        ],
-      });
+      if (title !== this.lastMediaTitle) {
+        ms.metadata = new MediaMetadata({
+          title,
+          artist: "Claude",
+          album: "Claude Talk",
+          artwork: [
+            { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+            { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+          ],
+        });
+        this.lastMediaTitle = title;
+      }
 
-      // Action handlers — registered once. Re-registering each time is fine,
-      // the browser just replaces the prior handler.
-      ms.setActionHandler("play", () => this.resume());
-      ms.setActionHandler("pause", () => this.pause());
-      ms.setActionHandler("stop", () => this.cancel());
-      ms.setActionHandler("seekbackward", (d) => this.skip(-(d.seekOffset ?? 10)));
-      ms.setActionHandler("seekforward", (d) => this.skip(d.seekOffset ?? 10));
-      ms.setActionHandler("previoustrack", () => this.replayLast());
+      if (!this.mediaSessionHandlersBound) {
+        ms.setActionHandler("play", () => this.resume());
+        ms.setActionHandler("pause", () => this.pause());
+        ms.setActionHandler("stop", () => this.cancel());
+        ms.setActionHandler("seekbackward", (d) =>
+          this.skip(-(d.seekOffset ?? 10)),
+        );
+        ms.setActionHandler("seekforward", (d) =>
+          this.skip(d.seekOffset ?? 10),
+        );
+        ms.setActionHandler("previoustrack", () => this.replayLast());
+        this.mediaSessionHandlersBound = true;
+      }
     } catch {
       /* MediaSession is best-effort. */
     }
