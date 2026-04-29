@@ -42,3 +42,4 @@ web/public/uploads/
 
 # Per-session uploads
 .attachments/
+web/tsconfig.tsbuildinfo
