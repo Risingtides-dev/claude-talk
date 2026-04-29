@@ -39,3 +39,6 @@ web/public/uploads/
 
 # Worktrees
 .worktrees/
+
+# Per-session uploads
+.attachments/
