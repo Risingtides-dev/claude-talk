@@ -467,8 +467,18 @@ export function Conversation({
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const v = input;
+    // Unlock the audio context inside the user-gesture chain (the form
+    // submit button click is a real gesture).
+    try {
+      speakerRef.current?.unlock();
+    } catch {
+      /* ignore */
+    }
     setInput("");
-    void send(v, "text");
+    // If voice mode is on, route text-typed messages through voice source
+    // too so the agent's reply gets spoken back. The user clearly wants
+    // audio if voice mode is toggled on.
+    void send(v, voiceMode ? "voice" : "text");
   }
 
   // Snapshot of `input` taken when recording starts; the live partial layers
@@ -535,7 +545,8 @@ export function Conversation({
 
   const titleLine = useMemo(() => {
     if (!session) return "No session selected";
-    return session.summary ?? session.firstPrompt ?? session.sessionId.slice(0, 8);
+    const raw = session.summary ?? session.firstPrompt ?? session.sessionId.slice(0, 8);
+    return raw.replace(/^\[ct\]\s*/, "");
   }, [session]);
 
   // Live transport state: blends the latched onTransport snapshot with the
@@ -847,8 +858,13 @@ export function Conversation({
                   e.preventDefault();
                   if (input.trim() && !streaming) {
                     const v = input;
+                    try {
+                      speakerRef.current?.unlock();
+                    } catch {
+                      /* ignore */
+                    }
                     setInput("");
-                    void send(v, "text");
+                    void send(v, voiceMode ? "voice" : "text");
                   }
                 }
               }}

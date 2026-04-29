@@ -296,8 +296,9 @@ function Row({
   onSelect: (s: Session) => void;
   hideProject?: boolean;
 }) {
-  const title =
+  const rawTitle =
     session.summary ?? session.firstPrompt ?? `Session ${session.sessionId.slice(0, 8)}`;
+  const title = rawTitle.replace(/^\[ct\]\s*/, "");
   return (
     <button
       className={`row ${active ? "active" : ""}`}

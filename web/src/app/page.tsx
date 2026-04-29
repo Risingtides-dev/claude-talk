@@ -46,7 +46,10 @@ export default function Page() {
         aria-label="Switch session"
       >
         <span className="mobile-title">
-          {active?.summary ?? active?.firstPrompt ?? "Pick a session"}
+          {(active?.summary ?? active?.firstPrompt ?? "Pick a session").replace(
+            /^\[ct\]\s*/,
+            "",
+          )}
         </span>
         <span className="chev">{pickerOpen ? "▴" : "▾"}</span>
       </button>
