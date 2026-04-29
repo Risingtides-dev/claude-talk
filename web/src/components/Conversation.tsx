@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { projectNameFromCwd } from "@/lib/format";
 import { Mic } from "./Mic";
-import { Speaker } from "@/lib/speaker";
+import { Speaker, type TransportState } from "@/lib/speaker";
 import { FilePicker } from "./FilePicker";
 
 type SessionMeta = {
@@ -137,6 +137,13 @@ export function Conversation({
   const stickToBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
   const speakerRef = useRef<Speaker | null>(null);
+  const [transport, setTransport] = useState<TransportState>({
+    status: "idle",
+    duration: 0,
+    position: 0,
+    hasAudio: false,
+  });
+  const [posTick, setPosTick] = useState(0);
 
   // Persist voice mode + speed + voice + autoArm; load voices list once
   useEffect(() => {
@@ -183,9 +190,23 @@ export function Conversation({
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!speakerRef.current) {
-      speakerRef.current = new Speaker({ voice: voiceName, rate: speed });
+      speakerRef.current = new Speaker({
+        voice: voiceName,
+        rate: speed,
+        onTransport: (s) => setTransport(s),
+      });
     }
-    return () => speakerRef.current?.cancel();
+    // Drive a 100ms position tick while playing so the scrubber updates.
+    const id = setInterval(() => {
+      const sp = speakerRef.current;
+      if (!sp) return;
+      const st = sp.state();
+      if (st.status === "playing") setPosTick((n) => n + 1);
+    }, 100);
+    return () => {
+      clearInterval(id);
+      speakerRef.current?.cancel();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -503,6 +524,20 @@ export function Conversation({
             <span>Voice</span>
           </button>
         </div>
+        {transport.hasAudio && (
+          <Transport
+            transport={transport}
+            // posTick keeps this re-rendering on the 100ms interval
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            tick={posTick}
+            onPause={() => speakerRef.current?.pause()}
+            onResume={() => speakerRef.current?.resume()}
+            onStop={() => speakerRef.current?.cancel()}
+            onReplay={() => speakerRef.current?.replayLast()}
+            onSkip={(d: number) => speakerRef.current?.skip(d)}
+            onSeek={(t: number) => speakerRef.current?.seek(t)}
+          />
+        )}
         <Mic
           state={micState}
           onState={setMicState}
@@ -902,6 +937,231 @@ export function Conversation({
         .send:disabled { opacity: 0.5; cursor: not-allowed; }
       `}</style>
     </main>
+  );
+}
+
+function fmtTime(s: number): string {
+  if (!Number.isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
+function Transport({
+  transport,
+  tick: _tick,
+  onPause,
+  onResume,
+  onStop,
+  onReplay,
+  onSkip,
+  onSeek,
+}: {
+  transport: TransportState;
+  tick: number;
+  onPause: () => void;
+  onResume: () => void;
+  onStop: () => void;
+  onReplay: () => void;
+  onSkip: (deltaSeconds: number) => void;
+  onSeek: (seconds: number) => void;
+}) {
+  const isPlaying = transport.status === "playing";
+  const isPaused = transport.status === "paused";
+  const dur = transport.duration || 0;
+  const pos = Math.min(transport.position || 0, dur || 0);
+
+  return (
+    <div className="transport" role="group" aria-label="Playback controls">
+      <button
+        className="t-btn"
+        onClick={() => onSkip(-10)}
+        title="Back 10s"
+        aria-label="Back 10 seconds"
+      >
+        <svg viewBox="0 0 24 24">
+          <path d="M11 4 4 11l7 7" />
+          <path d="M4 11h11a5 5 0 0 1 5 5v0" />
+        </svg>
+        <span className="t-label">10</span>
+      </button>
+      <button
+        className="t-btn t-play"
+        onClick={() => {
+          if (isPlaying) onPause();
+          else onResume();
+        }}
+        title={isPlaying ? "Pause" : "Play"}
+        aria-label={isPlaying ? "Pause" : "Play"}
+      >
+        {isPlaying ? (
+          <svg viewBox="0 0 24 24">
+            <rect x="6" y="5" width="4" height="14" />
+            <rect x="14" y="5" width="4" height="14" />
+          </svg>
+        ) : (
+          <svg viewBox="0 0 24 24">
+            <path d="M7 5v14l12-7z" />
+          </svg>
+        )}
+      </button>
+      <button
+        className="t-btn"
+        onClick={() => onSkip(10)}
+        title="Forward 10s"
+        aria-label="Forward 10 seconds"
+      >
+        <svg viewBox="0 0 24 24">
+          <path d="M13 4l7 7-7 7" />
+          <path d="M20 11H9a5 5 0 0 0-5 5v0" />
+        </svg>
+        <span className="t-label">10</span>
+      </button>
+      <input
+        className="t-scrub"
+        type="range"
+        min={0}
+        max={Math.max(dur, 0.01)}
+        step={0.05}
+        value={pos}
+        onChange={(e) => onSeek(parseFloat(e.target.value))}
+        aria-label="Scrub playback"
+        disabled={!transport.hasAudio || dur <= 0}
+      />
+      <span className="t-time" aria-live="off">
+        {fmtTime(pos)} / {fmtTime(dur)}
+      </span>
+      <button
+        className="t-btn"
+        onClick={onReplay}
+        title="Replay last response"
+        aria-label="Replay last response"
+      >
+        <svg viewBox="0 0 24 24">
+          <path d="M3 12a9 9 0 1 0 3-6.7" />
+          <path d="M3 4v5h5" />
+        </svg>
+      </button>
+      <button
+        className="t-btn t-stop"
+        onClick={onStop}
+        title="Stop"
+        aria-label="Stop playback"
+        disabled={!transport.hasAudio}
+      >
+        <svg viewBox="0 0 24 24">
+          <rect x="6" y="6" width="12" height="12" />
+        </svg>
+      </button>
+      <span className="t-status">
+        {transport.status === "loading"
+          ? "loading…"
+          : isPaused
+            ? "paused"
+            : isPlaying
+              ? "playing"
+              : "idle"}
+      </span>
+
+      <style jsx>{`
+        .transport {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          width: 100%;
+          max-width: 760px;
+          padding: 6px 8px;
+          background: hsl(var(--bg-100));
+          border: 1px solid hsl(var(--border-300) / 0.12);
+          border-radius: var(--radius-pill, 9999px);
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: hsl(var(--text-300));
+        }
+        .t-btn {
+          position: relative;
+          width: 30px;
+          height: 30px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          border-radius: 50%;
+          background: transparent;
+          color: hsl(var(--text-200));
+          transition: background var(--dur-fast) var(--ease),
+            color var(--dur-fast) var(--ease);
+        }
+        .t-btn:hover:not(:disabled) {
+          background: hsl(var(--bg-300));
+          color: hsl(var(--text-100));
+        }
+        .t-btn:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+        .t-btn :global(svg) {
+          width: 16px;
+          height: 16px;
+          stroke: currentColor;
+          fill: none;
+          stroke-width: 1.6;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        .t-play :global(svg) {
+          fill: currentColor;
+          stroke: none;
+        }
+        .t-stop :global(svg) {
+          fill: currentColor;
+          stroke: none;
+        }
+        .t-label {
+          position: absolute;
+          font-size: 8px;
+          font-weight: 600;
+          color: hsl(var(--text-400));
+          pointer-events: none;
+          bottom: 4px;
+        }
+        .t-scrub {
+          flex: 1;
+          min-width: 80px;
+          accent-color: hsl(var(--clay));
+          cursor: pointer;
+        }
+        .t-scrub:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+        .t-time {
+          min-width: 78px;
+          text-align: center;
+          color: hsl(var(--text-400));
+          font-variant-numeric: tabular-nums;
+        }
+        .t-status {
+          min-width: 56px;
+          text-align: right;
+          color: hsl(var(--text-400));
+          padding-right: 6px;
+        }
+        @media (max-width: 760px) {
+          .transport {
+            font-size: 10px;
+            gap: 4px;
+            padding: 4px 6px;
+          }
+          .t-time {
+            min-width: 64px;
+          }
+          .t-status {
+            display: none;
+          }
+        }
+      `}</style>
+    </div>
   );
 }
 
