@@ -1,16 +1,25 @@
-// Browser-side speaker. Sentence-buffered streaming; per-sentence wav fetched
-// from /api/tts, queued and played via Web Audio. playbackRate is used for the
-// 0.5–3x speed slider. Handles interrupt cleanly.
+// Browser-side speaker. Buffered text streaming + transport controls
+// (pause / resume / scrub / 10s skip / stop / replay last). Plays one
+// AudioBufferSource at a time. AudioContext.suspend() is the pause
+// mechanism so we can resume without re-decoding.
 
 export type SpeakerPrefs = {
-  voice?: string; // basename in voices/, e.g. "john"
-  rate?: number; // 0.5–3, default 1
+  voice?: string; // basename in voices/
+  rate?: number;  // 0.5–3, default 1
+  onIdle?: () => void;
+  onTransport?: (s: TransportState) => void;
+};
+
+export type TransportState = {
+  status: "idle" | "loading" | "playing" | "paused";
+  duration: number;     // seconds, 0 if unknown
+  position: number;     // seconds, current playhead within active wav
+  hasAudio: boolean;    // true once a buffer has been decoded for the active turn
 };
 
 type Job = {
   text: string;
   gen: number;
-  buffer: AudioBuffer | null;
   ready: Promise<AudioBuffer | null>;
 };
 
@@ -19,10 +28,24 @@ export class Speaker {
   private active = false;
   private prefs: SpeakerPrefs;
   private ctx: AudioContext | null = null;
-  private current: { source: AudioBufferSourceNode; ended: Promise<void> } | null = null;
+  private current:
+    | {
+        source: AudioBufferSourceNode;
+        buffer: AudioBuffer;
+        ended: Promise<void>;
+        startedAt: number; // ctx.currentTime when source.start was called
+        offset: number;    // start offset in seconds passed to source.start
+        completed: boolean;
+      }
+    | null = null;
   private queue: Job[] = [];
   private aborted = false;
   private gen = 0;
+  private running = false;
+  private lastTurnText = "";
+
+  // Transport state pushed to UI via prefs.onTransport
+  private status: TransportState["status"] = "idle";
 
   constructor(prefs: SpeakerPrefs = {}) {
     this.prefs = { rate: 1, ...prefs };
@@ -30,7 +53,6 @@ export class Speaker {
 
   setPrefs(prefs: SpeakerPrefs) {
     this.prefs = { ...this.prefs, ...prefs };
-    // Live-update playback rate of currently playing source
     if (this.current?.source && typeof this.prefs.rate === "number") {
       try {
         this.current.source.playbackRate.value = this.prefs.rate;
@@ -49,15 +71,10 @@ export class Speaker {
       if (!Ctor) throw new Error("AudioContext not supported");
       this.ctx = new Ctor();
     }
-    if (this.ctx.state === "suspended") void this.ctx.resume();
     return this.ctx;
   }
 
-  /**
-   * Must be called from inside a user-gesture handler (e.g. pointerdown on
-   * the mic button) to unlock playback on iOS Safari. Plays a silent buffer
-   * to fully wake the AudioContext.
-   */
+  /** iOS unlock: call from a user-gesture handler. */
   unlock() {
     try {
       const ctx = this.ensureCtx();
@@ -66,6 +83,7 @@ export class Speaker {
       src.buffer = buf;
       src.connect(ctx.destination);
       src.start(0);
+      if (ctx.state === "suspended") void ctx.resume();
     } catch {
       /* ignore */
     }
@@ -77,6 +95,7 @@ export class Speaker {
     this.buffer = "";
     this.active = true;
     this.gen += 1;
+    this.setStatus("loading");
     try {
       this.ensureCtx();
     } catch {
@@ -85,7 +104,6 @@ export class Speaker {
   }
 
   push(delta: string) {
-    // Buffer-only: never enqueue per-sentence. Whole response speaks in end().
     if (!this.active) return;
     this.buffer += delta;
   }
@@ -95,7 +113,10 @@ export class Speaker {
     const whole = this.buffer.trim();
     this.buffer = "";
     this.active = false;
-    if (whole.length > 0) this.enqueue(whole);
+    if (whole.length > 0) {
+      this.lastTurnText = whole;
+      this.enqueue(whole);
+    }
   }
 
   cancel() {
@@ -105,27 +126,149 @@ export class Speaker {
     this.active = false;
     if (this.current) {
       try {
+        this.current.source.onended = null;
         this.current.source.stop();
       } catch {
         /* ignore */
       }
       this.current = null;
     }
+    if (this.ctx?.state === "suspended") void this.ctx.resume();
+    this.setStatus("idle");
   }
 
-  private flushSentences(includeRemainder: boolean) {
-    const re = /([^.!?\n]+[.!?]+(?=\s|$)|[^.!?\n]+\n)/g;
-    let m: RegExpExecArray | null;
-    let lastIndex = 0;
-    while ((m = re.exec(this.buffer)) !== null) {
-      const piece = m[0].trim();
-      if (piece) this.enqueue(piece);
-      lastIndex = re.lastIndex;
+  /* ---------------- Transport API ---------------- */
+
+  async pause() {
+    if (!this.ctx || !this.current) return;
+    if (this.ctx.state === "running") {
+      try {
+        await this.ctx.suspend();
+      } catch {
+        /* ignore */
+      }
+      this.setStatus("paused");
     }
-    if (lastIndex > 0) this.buffer = this.buffer.slice(lastIndex);
-    if (includeRemainder && this.buffer.trim().length > 0) {
-      this.enqueue(this.buffer.trim());
-      this.buffer = "";
+  }
+
+  async resume() {
+    if (!this.ctx || !this.current) return;
+    if (this.ctx.state === "suspended") {
+      try {
+        await this.ctx.resume();
+      } catch {
+        /* ignore */
+      }
+      this.setStatus("playing");
+    }
+  }
+
+  /** Jump to absolute seconds within the current wav. */
+  seek(seconds: number) {
+    if (!this.current || !this.ctx) return;
+    const buf = this.current.buffer;
+    const t = Math.max(0, Math.min(seconds, buf.duration - 0.01));
+    this.restartFrom(buf, t);
+  }
+
+  /** Skip relative to current position. */
+  skip(deltaSeconds: number) {
+    if (!this.current) return;
+    this.seek(this.position() + deltaSeconds);
+  }
+
+  /** Replay the last assistant turn we spoke. */
+  replayLast() {
+    if (!this.lastTurnText) return;
+    this.cancel();
+    this.aborted = false;
+    this.gen += 1;
+    this.setStatus("loading");
+    try {
+      this.ensureCtx();
+    } catch {
+      return;
+    }
+    this.enqueue(this.lastTurnText);
+  }
+
+  /** Current playhead in seconds. */
+  position(): number {
+    if (!this.ctx || !this.current) return 0;
+    if (this.current.completed) return this.current.buffer.duration;
+    const elapsed =
+      (this.ctx.currentTime - this.current.startedAt) *
+      (this.prefs.rate ?? 1);
+    const pos = this.current.offset + elapsed;
+    return Math.max(0, Math.min(pos, this.current.buffer.duration));
+  }
+
+  duration(): number {
+    return this.current?.buffer.duration ?? 0;
+  }
+
+  state(): TransportState {
+    return {
+      status: this.status,
+      duration: this.duration(),
+      position: this.position(),
+      hasAudio: !!this.current,
+    };
+  }
+
+  /* ---------------- Internals ---------------- */
+
+  private restartFrom(buf: AudioBuffer, offset: number) {
+    if (!this.ctx) return;
+    // Stop any existing source, ignore its onended.
+    if (this.current) {
+      try {
+        this.current.source.onended = null;
+        this.current.source.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (this.ctx.state === "suspended") void this.ctx.resume();
+    const source = this.ctx.createBufferSource();
+    source.buffer = buf;
+    source.playbackRate.value = this.prefs.rate ?? 1;
+    source.connect(this.ctx.destination);
+
+    let resolveEnded!: () => void;
+    const ended = new Promise<void>((r) => {
+      resolveEnded = r;
+    });
+    source.onended = () => {
+      if (this.current && this.current.source === source) {
+        this.current.completed = true;
+      }
+      resolveEnded();
+    };
+
+    const startedAt = this.ctx.currentTime;
+    try {
+      source.start(0, offset);
+    } catch {
+      /* ignore */
+    }
+    this.current = {
+      source,
+      buffer: buf,
+      ended,
+      startedAt,
+      offset,
+      completed: false,
+    };
+    this.setStatus("playing");
+  }
+
+  private setStatus(s: TransportState["status"]) {
+    this.status = s;
+    try {
+      this.prefs.onTransport?.(this.state());
+    } catch {
+      /* ignore */
     }
   }
 
@@ -133,7 +276,6 @@ export class Speaker {
     const job: Job = {
       text: sentence,
       gen: this.gen,
-      buffer: null,
       ready: this.fetchAndDecode(sentence),
     };
     this.queue.push(job);
@@ -155,7 +297,6 @@ export class Speaker {
       }
       const ab = await res.arrayBuffer();
       const ctx = this.ensureCtx();
-      // decodeAudioData mutates the buffer; clone it for safety in some browsers
       return await ctx.decodeAudioData(ab.slice(0));
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -164,19 +305,18 @@ export class Speaker {
     }
   }
 
-  private running = false;
-
   private async tick() {
-    // Single-runner lock: only one tick loop ever active. Prevents the bug
-    // where parallel ticks each grabbed a job and started overlapping sources.
     if (this.running) return;
     this.running = true;
     try {
       while (true) {
         if (this.aborted) return;
         const next = this.queue.shift();
-        if (!next) return;
-        // Skip stale jobs from a previous begin() generation
+        if (!next) {
+          this.setStatus("idle");
+          this.prefs.onIdle?.();
+          return;
+        }
         if (next.gen !== this.gen) continue;
 
         const buf = await next.ready;
@@ -184,29 +324,13 @@ export class Speaker {
         if (next.gen !== this.gen) continue;
         if (!buf) continue;
 
-        const ctx = this.ensureCtx();
-        const source = ctx.createBufferSource();
-        source.buffer = buf;
-        source.playbackRate.value = this.prefs.rate ?? 1;
-        source.connect(ctx.destination);
-
-        const ended = new Promise<void>((resolve) => {
-          source.onended = () => resolve();
-        });
-        this.current = { source, ended };
-        try {
-          source.start();
-        } catch {
-          this.current = null;
-          continue;
+        this.restartFrom(buf, 0);
+        const cur = this.current!;
+        await cur.ended;
+        if (this.current?.source === cur.source) {
+          // Keep current pinned at the end so transport shows full duration
+          // until cancel() or a new turn arrives. UI can call replayLast or seek.
         }
-        await ended;
-        if (this.current?.source === source) this.current = null;
-        if (this.aborted) return;
-        // Tiny gap to let the previous sentence's audio fully drain before
-        // the next source.start(). Without this you can hear the next
-        // sentence begin a hair early and overlap the tail of the last one.
-        await new Promise<void>((r) => setTimeout(r, 80));
         if (this.aborted) return;
       }
     } finally {
