@@ -41,6 +41,74 @@ function summarizeTool(name: string, input: unknown): string {
   return name;
 }
 
+/**
+ * Turn a tool-call event into a short conversational status the speaker can
+ * read aloud, so voice mode never falls into dead silence while the agent
+ * is doing work. Keeps it casual and short — no jargon, no full file paths.
+ */
+function phraseForTool(name: string, summary: string): string | null {
+  const lower = (name || "").toLowerCase();
+  // Pull a friendly target out of summaries like "Read /path/to/foo.ts" or
+  // "Bash git status" — last segment is usually the bit a human cares about.
+  const target = (() => {
+    if (!summary) return "";
+    const parts = summary.trim().split(/\s+/);
+    if (parts.length < 2) return "";
+    const tail = parts.slice(1).join(" ");
+    // Strip directories from file paths so we don't read out the whole tree.
+    const slash = tail.lastIndexOf("/");
+    if (slash >= 0 && slash < tail.length - 1) return tail.slice(slash + 1);
+    return tail.length > 30 ? "" : tail;
+  })();
+  // Pick a short, friendly verb based on the tool family.
+  let verb: string;
+  if (lower === "read" || lower === "notebookread") {
+    verb = target ? `checking ${target}` : "checking that file";
+  } else if (lower === "write" || lower === "create") {
+    verb = target ? `writing ${target} now` : "writing it out now";
+  } else if (
+    lower === "edit" ||
+    lower === "multiedit" ||
+    lower === "notebookedit"
+  ) {
+    verb = target ? `editing ${target}` : "making the change";
+  } else if (lower === "bash" || lower === "shell") {
+    verb = "running a quick command";
+  } else if (lower === "grep" || lower === "search") {
+    verb = "searching for that";
+  } else if (lower === "glob" || lower === "ls" || lower === "find") {
+    verb = "finding it";
+  } else if (lower === "webfetch" || lower === "fetch") {
+    verb = "pulling up that page";
+  } else if (lower === "websearch") {
+    verb = "looking that up online";
+  } else if (lower === "task" || lower === "agent") {
+    verb = "kicking off a sub-task";
+  } else if (lower.startsWith("mcp__")) {
+    // MCP tool — describe by server when we can.
+    const parts = lower.split("__");
+    const server = parts[1] ?? "";
+    if (server.includes("slack")) verb = "checking slack";
+    else if (server.includes("gmail") || server.includes("mail")) verb = "checking your mail";
+    else if (server.includes("notion")) verb = "checking notion";
+    else if (server.includes("linear")) verb = "checking linear";
+    else if (server.includes("supabase")) verb = "hitting the database";
+    else if (server.includes("git")) verb = "running a git check";
+    else if (server.includes("calendar")) verb = "checking your calendar";
+    else if (server.includes("drive")) verb = "looking at drive";
+    else verb = "calling out to a tool";
+  } else if (!name) {
+    return null;
+  } else {
+    verb = "working on that";
+  }
+  // Add a soft connector so it lands like a thought, not a robot.
+  const lead = ["okay", "alright", "one sec", "right"][
+    Math.floor(Math.random() * 4)
+  ];
+  return `${lead}, ${verb}.`;
+}
+
 function stripVoicePreamble(s: string): string {
   // Legacy: older sessions have the wrapper baked into the user message.
   // Strip both the original preamble and any leading [Voice mode ...] block,
@@ -329,6 +397,10 @@ export function Conversation({
         /* ignore */
       }
       speakerRef.current?.cancel();
+      // Play a tiny "mhm" right now so the user hears something while the
+      // LLM + first TTS chunk are still being generated. Real chunks will
+      // preempt it the moment they're ready.
+      void speakerRef.current?.playBackchannel();
       setMicState("speaking");
     } else {
       setMicState("idle");
@@ -348,18 +420,25 @@ export function Conversation({
         signal: ac.signal,
       });
       if (!res.body) throw new Error("No stream");
-      // Sentence-streaming TTS buffer. Each completed sentence becomes its
-      // own WAV in the speaker queue so playback starts within a couple
-      // seconds instead of waiting for the whole turn.
+      // Streaming TTS buffer. We chunk aggressively for the FIRST piece
+      // (clause-level — comma, semicolon, dash, period) so playback starts
+      // ASAP, then relax to sentence-level chunks for the rest of the turn
+      // to keep prosody natural.
       let ttsPending = "";
+      let firstChunkSent = false;
+      const FIRST_CHUNK_RE = /([,;:—–.!?]+|\n+)(\s|$)/g; // comma/em-dash/etc
+      const SENTENCE_RE = /([.!?]+|\n+)(\s|$)/g;
       const flushSentence = (force = false) => {
         if (!willSpeak) return;
-        // Find the last sentence-ender in the pending buffer.
-        const re = /([.!?]+|\n+)(\s|$)/g;
+        const re = firstChunkSent ? SENTENCE_RE : FIRST_CHUNK_RE;
+        re.lastIndex = 0;
         let lastEnd = -1;
         let m: RegExpExecArray | null;
         while ((m = re.exec(ttsPending)) !== null) {
           lastEnd = m.index + m[1].length;
+          // For first chunk: bail at the first qualifying boundary so
+          // playback starts ASAP. After that, flush all sentences in buffer.
+          if (!firstChunkSent) break;
         }
         let chunk = "";
         if (lastEnd > 0) {
@@ -369,14 +448,16 @@ export function Conversation({
           chunk = ttsPending.trim();
           ttsPending = "";
         }
-        // Only flush meaningful chunks (avoid one-word fragments mid-stream)
-        if (!force && chunk.length < 12) {
-          // Put it back and wait for more text to arrive.
+        // First chunk can be small (a clause is fine, e.g. "Yeah, so,")
+        // but require some substance. Subsequent chunks need more meat.
+        const minLen = firstChunkSent ? 12 : 4;
+        if (!force && chunk.length < minLen) {
           ttsPending = chunk + (ttsPending ? " " + ttsPending : "");
           return;
         }
         if (chunk.length > 0) {
           speakerRef.current?.enqueueChunk(chunk);
+          firstChunkSent = true;
         }
       };
       const reader = res.body.getReader();
@@ -413,6 +494,21 @@ export function Conversation({
           } else if (data.type === "tool" && typeof data.summary === "string") {
             tools.push(data.summary);
             setStreamTools([...tools]);
+            // Voice mode: narrate the tool call. Flush any in-flight text
+            // first so the narration lands AFTER what Claude was just
+            // saying, then slot in a short spoken status. The speaker queue
+            // locks order at enqueue time, so this plays exactly where it
+            // belongs in the audio stream.
+            if (willSpeak) {
+              flushSentence(true);
+              const phrase = phraseForTool(
+                (data.name as string | undefined) ?? "",
+                data.summary,
+              );
+              if (phrase) {
+                speakerRef.current?.enqueueChunk(phrase);
+              }
+            }
           } else if (data.type === "result") {
             setTurns((t) => [
               ...t,
