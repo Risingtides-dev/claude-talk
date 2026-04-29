@@ -520,9 +520,16 @@ export function Conversation({
   function sendStaged() {
     const v = input.trim();
     if (!v || streaming) return;
+    // Unlock and resume audio synchronously inside the tap gesture. iOS
+    // requires this to happen in the same synchronous callstack as the
+    // touch event, otherwise the AudioContext stays suspended and no
+    // playback ever happens for this turn.
+    try {
+      speakerRef.current?.unlock();
+    } catch {
+      /* ignore */
+    }
     setInput("");
-    // Voice source so the agent's reply is spoken aloud, matching the
-    // assumption the user spoke their turn.
     void send(v, voiceMode ? "voice" : "text");
   }
 
