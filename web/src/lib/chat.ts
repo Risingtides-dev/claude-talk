@@ -1,6 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
-const VOICE_SYSTEM_NOTE = `The user's most recent message was spoken into a microphone and the response will be read aloud by text-to-speech. Reply in plain prose suitable for TTS: no headings, no bullet lists, no code blocks, no markdown. Lead with a 1–2 sentence direct answer; stop and wait. If the user says "go on" or asks for details, continue. Do not narrate tool calls.`;
+const VOICE_SYSTEM_NOTE = `The user's most recent message was spoken into a microphone and the response will be read aloud by text-to-speech. Reply in plain prose suitable for TTS: no headings, no bullet lists, no code blocks, no markdown. Lead with a 1–2 sentence direct answer; stop and wait. If the user says "go on" or asks for details, continue. Do not narrate tool calls.
+
+Open every reply with a short conversational lead-in — "Yeah, so…", "Okay,", "Hmm,", "Right,", "Good question —", "Honestly,", or similar — so the first words can start playing instantly while the rest streams. Vary the openers; never use "Certainly" or "Of course" or "I'd be happy to". No sign-off rituals, no "Let me know if there's anything else." Talk like a friend who happens to know the answer.`;
 
 export type ChatEvent =
   | { type: "init"; sessionId: string }
