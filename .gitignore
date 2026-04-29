@@ -43,3 +43,7 @@ web/public/uploads/
 # Per-session uploads
 .attachments/
 web/tsconfig.tsbuildinfo
+
+# TS incremental build cache
+web/tsconfig.tsbuildinfo
+
