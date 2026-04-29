@@ -1,58 +1,41 @@
-// Browser-side speaker. Buffered text streaming + transport controls
-// (pause / resume / scrub / 10s skip / stop / replay last). Plays one
-// AudioBufferSource at a time. AudioContext.suspend() is the pause
-// mechanism so we can resume without re-decoding.
+// HTMLAudioElement-based speaker. Plays a queue of TTS WAV blobs back-to-back.
+// Uses <audio> instead of WebAudio because iOS PWA standalone mode plays
+// HTMLAudio reliably while WebAudio often stays silent there.
 
 export type SpeakerPrefs = {
-  voice?: string; // basename in voices/
-  rate?: number;  // 0.5–3, default 1
+  voice?: string;
+  rate?: number;
   onIdle?: () => void;
   onTransport?: (s: TransportState) => void;
 };
 
 export type TransportState = {
   status: "idle" | "loading" | "playing" | "paused";
-  duration: number;     // seconds, 0 if unknown
-  position: number;     // seconds, current playhead within active wav
-  hasAudio: boolean;    // true once a buffer has been decoded for the active turn
+  duration: number;
+  position: number;
+  hasAudio: boolean;
 };
 
-/** Karaoke snapshot: which text is currently playing and how far into it we are. */
 export type KaraokeState = {
-  text: string;             // full text of the currently-playing WAV ("" if none)
-  charProgress: number;     // 0..1 fraction of text elapsed by playhead
+  text: string;
+  charProgress: number;
 };
 
 type Job = {
   text: string;
-  gen: number;
-  ready: Promise<AudioBuffer | null>;
+  url: string;       // object URL for the decoded WAV
+  duration: number;  // seconds
 };
 
 export class Speaker {
-  private buffer = "";
-  private active = false;
   private prefs: SpeakerPrefs;
-  private ctx: AudioContext | null = null;
-  private current:
-    | {
-        source: AudioBufferSourceNode;
-        buffer: AudioBuffer;
-        ended: Promise<void>;
-        startedAt: number; // ctx.currentTime when source.start was called
-        offset: number;    // start offset in seconds passed to source.start
-        completed: boolean;
-        text: string;      // sentence text powering this WAV (for karaoke)
-      }
-    | null = null;
+  private audio: HTMLAudioElement | null = null;
   private queue: Job[] = [];
-  private aborted = false;
-  private gen = 0;
+  private current: Job | null = null;
   private running = false;
-  private lastTurnText = "";
-
-  // Transport state pushed to UI via prefs.onTransport
+  private aborted = false;
   private status: TransportState["status"] = "idle";
+  private lastTurnText = "";
 
   constructor(prefs: SpeakerPrefs = {}) {
     this.prefs = { rate: 1, ...prefs };
@@ -60,37 +43,37 @@ export class Speaker {
 
   setPrefs(prefs: SpeakerPrefs) {
     this.prefs = { ...this.prefs, ...prefs };
-    if (this.current?.source && typeof this.prefs.rate === "number") {
+    if (this.audio && typeof this.prefs.rate === "number") {
       try {
-        this.current.source.playbackRate.value = this.prefs.rate;
+        this.audio.playbackRate = this.prefs.rate;
       } catch {
         /* ignore */
       }
     }
   }
 
-  private ensureCtx(): AudioContext {
-    if (!this.ctx) {
-      const Ctor =
-        (window as unknown as { AudioContext?: typeof AudioContext }).AudioContext ??
-        (window as unknown as { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-      if (!Ctor) throw new Error("AudioContext not supported");
-      this.ctx = new Ctor();
-    }
-    return this.ctx;
-  }
-
-  /** iOS unlock: call from a user-gesture handler. */
+  /** iOS unlock — call inside a user-gesture handler. */
   unlock() {
+    if (!this.audio) this.audio = this.createAudioEl();
+    // Loading a 1-frame silent data URI inside a gesture is enough to mark the
+    // <audio> element as user-allowed for future src changes + plays on iOS.
     try {
-      const ctx = this.ensureCtx();
-      const buf = ctx.createBuffer(1, 1, 22050);
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      src.start(0);
-      if (ctx.state === "suspended") void ctx.resume();
+      const a = this.audio;
+      if (!a.dataset.unlocked) {
+        a.muted = true;
+        a.src =
+          "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+        const p = a.play();
+        if (p && typeof p.then === "function") {
+          p.then(() => {
+            a.pause();
+            a.muted = false;
+            a.dataset.unlocked = "1";
+          }).catch(() => {
+            a.muted = false;
+          });
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -99,168 +82,96 @@ export class Speaker {
   begin() {
     this.cancel();
     this.aborted = false;
-    this.buffer = "";
-    this.active = true;
-    this.gen += 1;
     this.setStatus("loading");
-    try {
-      this.ensureCtx();
-    } catch {
-      /* will throw later if used */
-    }
   }
 
-  push(delta: string) {
-    if (!this.active) {
-      this.active = true;
-    }
-    this.buffer += delta;
-    this.flushSentences(false);
-  }
-
-  end() {
-    if (!this.active) return;
-    this.flushSentences(true);
-    this.active = false;
-    if (this.lastTurnAccum.trim().length > 0) {
-      this.lastTurnText = this.lastTurnAccum.trim();
-    }
-    this.lastTurnAccum = "";
-  }
-
-  // Streaming sentence flush: enqueue each completed sentence the moment it
-  // arrives. Runs strictly serial via the existing tick lock.
-  private lastTurnAccum = "";
-  private flushSentences(includeRemainder: boolean) {
-    const re = /([^.!?\n]+[.!?]+(?=\s|$)|[^.!?\n]+\n)/g;
-    let m: RegExpExecArray | null;
-    let lastIndex = 0;
-    while ((m = re.exec(this.buffer)) !== null) {
-      const piece = m[0].trim();
-      if (piece) {
-        this.lastTurnAccum += piece + " ";
-        this.enqueue(piece);
-      }
-      lastIndex = re.lastIndex;
-    }
-    if (lastIndex > 0) this.buffer = this.buffer.slice(lastIndex);
-    if (includeRemainder && this.buffer.trim().length > 0) {
-      const tail = this.buffer.trim();
-      this.lastTurnAccum += tail + " ";
-      this.enqueue(tail);
-      this.buffer = "";
-    }
-  }
-
-  /**
-   * Append a chunk of text directly to the play queue without canceling
-   * anything currently queued or playing. Used for sentence-by-sentence
-   * streaming so each chunk plays back-to-back.
-   */
+  /** Append a chunk and play it back when its turn comes up in the queue. */
   enqueueChunk(text: string) {
     const t = text.trim();
     if (!t) return;
-    try {
-      this.ensureCtx();
-    } catch {
-      /* ignore */
-    }
     this.aborted = false;
     this.lastTurnText = (this.lastTurnText + " " + t).trim();
     if (this.status === "idle") this.setStatus("loading");
-    // eslint-disable-next-line no-console
-    console.log("[speaker] enqueueChunk", t.length, "chars");
-    this.enqueue(t);
+    void this.fetchAndQueue(t);
+  }
+
+  // Compatibility shims so existing callers (begin/push/end) still work.
+  private buffer = "";
+  push(delta: string) {
+    this.buffer += delta;
+  }
+  end() {
+    const whole = this.buffer.trim();
+    this.buffer = "";
+    if (whole.length > 0) this.enqueueChunk(whole);
   }
 
   cancel() {
     this.aborted = true;
     this.queue = [];
+    this.current = null;
     this.buffer = "";
-    this.active = false;
-    if (this.current) {
+    if (this.audio) {
       try {
-        this.current.source.onended = null;
-        this.current.source.stop();
+        this.audio.pause();
+        this.audio.currentTime = 0;
       } catch {
         /* ignore */
       }
-      this.current = null;
     }
-    if (this.ctx?.state === "suspended") void this.ctx.resume();
     this.setStatus("idle");
   }
 
-  /* ---------------- Transport API ---------------- */
-
-  async pause() {
-    if (!this.ctx || !this.current) return;
-    if (this.ctx.state === "running") {
-      try {
-        await this.ctx.suspend();
-      } catch {
-        /* ignore */
-      }
-      this.setStatus("paused");
+  pause() {
+    if (!this.audio) return;
+    try {
+      this.audio.pause();
+    } catch {
+      /* ignore */
     }
+    this.setStatus("paused");
   }
 
-  async resume() {
-    if (!this.ctx || !this.current) return;
-    if (this.ctx.state === "suspended") {
-      try {
-        await this.ctx.resume();
-      } catch {
-        /* ignore */
-      }
-      this.setStatus("playing");
+  resume() {
+    if (!this.audio || !this.current) return;
+    try {
+      void this.audio.play();
+    } catch {
+      /* ignore */
     }
+    this.setStatus("playing");
   }
 
-  /** Jump to absolute seconds within the current wav. */
   seek(seconds: number) {
-    if (!this.current || !this.ctx) return;
-    const buf = this.current.buffer;
-    const t = Math.max(0, Math.min(seconds, buf.duration - 0.01));
-    void this.restartFrom(buf, t);
+    if (!this.audio || !this.current) return;
+    try {
+      this.audio.currentTime = Math.max(
+        0,
+        Math.min(seconds, this.current.duration - 0.01),
+      );
+    } catch {
+      /* ignore */
+    }
   }
 
-  /** Skip relative to current position. */
   skip(deltaSeconds: number) {
-    if (!this.current) return;
     this.seek(this.position() + deltaSeconds);
   }
 
-  /** Replay the last assistant turn we spoke. */
   replayLast() {
     if (!this.lastTurnText) return;
     this.cancel();
     this.aborted = false;
-    this.gen += 1;
     this.setStatus("loading");
-    try {
-      this.ensureCtx();
-    } catch {
-      return;
-    }
-    this.enqueue(this.lastTurnText);
+    void this.fetchAndQueue(this.lastTurnText);
   }
 
-  /** Current playhead in seconds. */
   position(): number {
-    if (!this.ctx || !this.current) return 0;
-    if (this.current.completed) return this.current.buffer.duration;
-    const elapsed =
-      (this.ctx.currentTime - this.current.startedAt) *
-      (this.prefs.rate ?? 1);
-    const pos = this.current.offset + elapsed;
-    return Math.max(0, Math.min(pos, this.current.buffer.duration));
+    return this.audio?.currentTime ?? 0;
   }
-
   duration(): number {
-    return this.current?.buffer.duration ?? 0;
+    return this.current?.duration ?? this.audio?.duration ?? 0;
   }
-
   state(): TransportState {
     return {
       status: this.status,
@@ -269,131 +180,69 @@ export class Speaker {
       hasAudio: !!this.current,
     };
   }
-
-  /**
-   * Snapshot of karaoke progress: which sentence is playing and how far into
-   * its text the playhead has elapsed (0..1 by character count). Bubbles use
-   * this to highlight the active word.
-   */
   karaoke(): KaraokeState {
     if (!this.current) return { text: "", charProgress: 0 };
-    const dur = this.current.buffer.duration;
+    const dur = this.current.duration;
     const pos = this.position();
     const frac = dur > 0 ? Math.max(0, Math.min(1, pos / dur)) : 0;
     return { text: this.current.text, charProgress: frac };
   }
 
-  /* ---------------- Internals ---------------- */
+  /* ------------ internals ------------ */
 
-  private async restartFrom(buf: AudioBuffer, offset: number, text?: string) {
-    if (!this.ctx) return;
-    // Always nudge the AudioContext awake before scheduling a source. iOS
-    // can suspend the context after backgrounding the PWA, audio interruptions,
-    // or simply on its own; without a resume here `source.start()` succeeds
-    // silently and you hear nothing.
-    if (this.ctx.state !== "running") {
-      try {
-        await this.ctx.resume();
-      } catch {
-        /* ignore — we'll still try to start the source */
-      }
-    }
-    // Carry over existing text if we're restarting the same WAV (seek/skip)
-    const carriedText = text ?? this.current?.text ?? "";
-    // Stop any existing source, ignore its onended.
-    if (this.current) {
-      try {
-        this.current.source.onended = null;
-        this.current.source.stop();
-      } catch {
-        /* ignore */
-      }
-    }
-    if (this.ctx.state === "suspended") void this.ctx.resume();
-    const source = this.ctx.createBufferSource();
-    source.buffer = buf;
-    source.playbackRate.value = this.prefs.rate ?? 1;
-    source.connect(this.ctx.destination);
-
-    let resolveEnded!: () => void;
-    const ended = new Promise<void>((r) => {
-      resolveEnded = r;
+  private createAudioEl(): HTMLAudioElement {
+    const a = new Audio();
+    a.preload = "auto";
+    a.playbackRate = this.prefs.rate ?? 1;
+    a.addEventListener("timeupdate", () => {
+      // status updates are pushed via setStatus; timeupdate just keeps the
+      // transport.position fresh on parent reads.
+      if (this.audio === a) this.prefs.onTransport?.(this.state());
     });
-    source.onended = () => {
-      if (this.current && this.current.source === source) {
-        this.current.completed = true;
-      }
-      resolveEnded();
-    };
-
-    const startedAt = this.ctx.currentTime;
-    try {
-      source.start(0, offset);
-      // eslint-disable-next-line no-console
-      console.log("[speaker] source.start at", offset, "ctx state:", this.ctx.state);
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[speaker] source.start failed", err);
-    }
-    this.current = {
-      source,
-      buffer: buf,
-      ended,
-      startedAt,
-      offset,
-      completed: false,
-      text: carriedText,
-    };
-    this.setStatus("playing");
+    a.addEventListener("ended", () => {
+      // current track finished; advance.
+    });
+    return a;
   }
 
-  private setStatus(s: TransportState["status"]) {
-    this.status = s;
+  private async fetchAndQueue(text: string) {
     try {
-      this.prefs.onTransport?.(this.state());
-    } catch {
-      /* ignore */
-    }
-  }
-
-  private enqueue(sentence: string) {
-    const job: Job = {
-      text: sentence,
-      gen: this.gen,
-      ready: this.fetchAndDecode(sentence),
-    };
-    this.queue.push(job);
-    void this.tick();
-  }
-
-  private async fetchAndDecode(text: string): Promise<AudioBuffer | null> {
-    try {
-      // eslint-disable-next-line no-console
-      console.log("[speaker] fetchAndDecode → /api/tts", { len: text.length, voice: this.prefs.voice ?? "claude" });
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, voice: this.prefs.voice ?? "claude" }),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        // eslint-disable-next-line no-console
-        console.error("[speaker] /api/tts failed", res.status, j);
-        return null;
-      }
+      if (!res.ok) return;
       const ab = await res.arrayBuffer();
-      const ctx = this.ensureCtx();
-      // eslint-disable-next-line no-console
-      console.log("[speaker] tts → bytes:", ab.byteLength, "ctx state:", ctx.state);
-      const buf = await ctx.decodeAudioData(ab.slice(0));
-      // eslint-disable-next-line no-console
-      console.log("[speaker] decoded:", buf.duration.toFixed(2), "s");
-      return buf;
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("[speaker] fetch/decode failed", err);
-      return null;
+      const blob = new Blob([new Uint8Array(ab)], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+      // Get duration without playing — load metadata only.
+      const dur = await this.probeDuration(url);
+      this.queue.push({ text, url, duration: dur });
+      void this.tick();
+    } catch {
+      /* ignore */
     }
+  }
+
+  private probeDuration(url: string): Promise<number> {
+    return new Promise((resolve) => {
+      const probe = new Audio();
+      probe.preload = "metadata";
+      probe.src = url;
+      const finish = (d: number) => {
+        try {
+          probe.src = "";
+        } catch {
+          /* ignore */
+        }
+        resolve(Number.isFinite(d) ? d : 0);
+      };
+      probe.addEventListener("loadedmetadata", () => finish(probe.duration));
+      probe.addEventListener("error", () => finish(0));
+      // safety timeout
+      setTimeout(() => finish(probe.duration || 0), 2000);
+    });
   }
 
   private async tick() {
@@ -404,28 +253,52 @@ export class Speaker {
         if (this.aborted) return;
         const next = this.queue.shift();
         if (!next) {
+          this.current = null;
           this.setStatus("idle");
           this.prefs.onIdle?.();
           return;
         }
-        if (next.gen !== this.gen) continue;
-
-        const buf = await next.ready;
-        if (this.aborted) return;
-        if (next.gen !== this.gen) continue;
-        if (!buf) continue;
-
-        await this.restartFrom(buf, 0, next.text);
-        const cur = this.current!;
-        await cur.ended;
-        if (this.current?.source === cur.source) {
-          // Keep current pinned at the end so transport shows full duration
-          // until cancel() or a new turn arrives. UI can call replayLast or seek.
+        if (!this.audio) this.audio = this.createAudioEl();
+        this.current = next;
+        this.audio.src = next.url;
+        this.audio.playbackRate = this.prefs.rate ?? 1;
+        this.setStatus("playing");
+        try {
+          await this.audio.play();
+        } catch {
+          // play() can reject if context wasn't unlocked — bail this chunk.
+          continue;
+        }
+        // Wait for playback to end (or be canceled).
+        await new Promise<void>((resolve) => {
+          if (!this.audio) return resolve();
+          const a = this.audio;
+          const onEnd = () => {
+            a.removeEventListener("ended", onEnd);
+            a.removeEventListener("error", onEnd);
+            resolve();
+          };
+          a.addEventListener("ended", onEnd);
+          a.addEventListener("error", onEnd);
+        });
+        try {
+          URL.revokeObjectURL(next.url);
+        } catch {
+          /* ignore */
         }
         if (this.aborted) return;
       }
     } finally {
       this.running = false;
+    }
+  }
+
+  private setStatus(s: TransportState["status"]) {
+    this.status = s;
+    try {
+      this.prefs.onTransport?.(this.state());
+    } catch {
+      /* ignore */
     }
   }
 }
