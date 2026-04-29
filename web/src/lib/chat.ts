@@ -52,6 +52,10 @@ export async function runChatTurn(args: ChatTurnArgs): Promise<void> {
       resume: args.sessionId,
       abortController: ac,
       permissionMode: args.permissionMode ?? "bypassPermissions",
+      // Stream raw token deltas via stream_event messages so the UI can
+      // render text as it's produced, instead of waiting for the entire
+      // assistant message to finish.
+      includePartialMessages: true,
       ...(args.source === "voice"
         ? { appendSystemPrompt: VOICE_SYSTEM_NOTE }
         : {}),
@@ -59,21 +63,43 @@ export async function runChatTurn(args: ChatTurnArgs): Promise<void> {
   });
 
   let resolvedSessionId = args.sessionId ?? "";
+  // Track the index of text blocks we've already streamed so we don't
+  // re-emit them when the final assistant message arrives.
+  const streamedTextBlockIndices = new Set<number>();
 
   try {
     for await (const message of iter) {
       if (args.signal?.aborted) break;
+
       if (message.type === "system" && message.subtype === "init") {
         resolvedSessionId = message.session_id ?? resolvedSessionId;
         args.onEvent({ type: "init", sessionId: resolvedSessionId });
         continue;
       }
 
+      // Token-by-token streaming text deltas.
+      if (message.type === "stream_event") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ev: any = message.event;
+        if (ev?.type === "content_block_delta") {
+          const delta = ev.delta;
+          if (delta?.type === "text_delta" && typeof delta.text === "string") {
+            args.onEvent({ type: "text", delta: delta.text });
+            if (typeof ev.index === "number") {
+              streamedTextBlockIndices.add(ev.index);
+            }
+          }
+        }
+        continue;
+      }
+
       if (message.type === "assistant") {
         const content = message.message?.content;
         if (Array.isArray(content)) {
-          for (const block of content) {
+          content.forEach((block, idx) => {
             if (block.type === "text" && block.text) {
+              // Skip text blocks we've already streamed via stream_event.
+              if (streamedTextBlockIndices.has(idx)) return;
               args.onEvent({ type: "text", delta: block.text });
             } else if (block.type === "tool_use") {
               args.onEvent({
@@ -82,7 +108,11 @@ export async function runChatTurn(args: ChatTurnArgs): Promise<void> {
                 summary: summarizeToolUse(block.name, block.input),
               });
             }
-          }
+          });
+          // Reset for the next assistant message in this turn (e.g. after
+          // a tool result, the agent produces a fresh assistant message
+          // with its own block indices).
+          streamedTextBlockIndices.clear();
         }
         continue;
       }
