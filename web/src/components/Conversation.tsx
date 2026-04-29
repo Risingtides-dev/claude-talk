@@ -427,14 +427,44 @@ export function Conversation({
     void send(v, "text");
   }
 
+  // Snapshot of `input` taken when recording starts; the live partial layers
+  // on top of this and whisper's final replaces the partial portion on stop.
+  const partialBaseRef = useRef<string>("");
+
+  function handleMicState(s: MicState) {
+    setMicState((prev) => {
+      if (s === "recording" && prev !== "recording") {
+        // About to start recording: snapshot the staged text so we know
+        // what the transcript should be appended to.
+        partialBaseRef.current = input;
+        setShowInput(true);
+      } else if (
+        prev === "recording" &&
+        (s === "transcribing" || s === "idle")
+      ) {
+        // Just stopped recording. Don't blank the composer while whisper
+        // catches up — promote the live partial into `input` immediately so
+        // the user keeps seeing the same words. handleTranscript will swap
+        // in the whisper-accurate version when it lands.
+        const base = partialBaseRef.current;
+        const partial = livePartial.trim();
+        if (partial) {
+          setInput(base ? `${base} ${partial}`.trim() : partial);
+        }
+        setLivePartial("");
+      }
+      return s;
+    });
+  }
+
   function handleTranscript(text: string, _ms: number) {
+    // The composer was already populated with the live partial in
+    // handleMicState. Now replace the partial portion with the whisper
+    // version; we identify the partial portion as everything after the base.
     setMicState("idle");
-    setLivePartial("");
-    // Stage the (whisper-accurate) transcript instead of auto-sending. The
-    // composer is already visible because the live partial revealed it
-    // during recording. The whisper text replaces / appends to what's there.
+    const base = partialBaseRef.current;
     setShowInput(true);
-    setInput((cur) => (cur ? `${cur} ${text}` : text));
+    setInput(base ? `${base} ${text}`.trim() : text);
   }
 
   function handleLivePartial(partial: string) {
@@ -604,7 +634,7 @@ export function Conversation({
         </div>
         <Mic
           state={micState}
-          onState={setMicState}
+          onState={handleMicState}
           onTranscript={handleTranscript}
           onInterrupt={interrupt}
           onPress={() => speakerRef.current?.unlock()}

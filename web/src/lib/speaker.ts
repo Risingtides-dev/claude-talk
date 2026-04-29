@@ -111,7 +111,13 @@ export class Speaker {
   }
 
   push(delta: string) {
-    if (!this.active) return;
+    // Auto-revive after a prior end(): the SDK fires multiple result events
+    // per turn, and each may be followed by more text deltas. We want each
+    // begin/end cycle to enqueue its own WAV in the play queue, with new
+    // pushes after an end implicitly starting the next one.
+    if (!this.active) {
+      this.active = true;
+    }
     this.buffer += delta;
   }
 
